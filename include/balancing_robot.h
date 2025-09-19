@@ -26,10 +26,12 @@
 #define I2C_FREQ_HZ 400000
 
 // Motor Control Pins (adjust according to your motor driver)
-#define MOTOR_LEFT_PWM_PIN 18
-#define MOTOR_LEFT_DIR_PIN 19
-#define MOTOR_RIGHT_PWM_PIN 16
-#define MOTOR_RIGHT_DIR_PIN 17
+#define MOTOR_LEFT_PWM_PIN 14
+#define MOTOR_LEFT_IN1_PIN 27
+#define MOTOR_LEFT_IN2_PIN 26
+#define MOTOR_RIGHT_PWM_PIN 32
+#define MOTOR_RIGHT_IN1_PIN 25
+#define MOTOR_RIGHT_IN2_PIN 33
 
 // Task Priorities (higher number = higher priority)
 #define SENSOR_TASK_PRIORITY 5
@@ -45,7 +47,7 @@
 
 // Control Parameters
 #define CONTROL_LOOP_FREQ_HZ 100  // 100Hz control loop
-#define SENSOR_READ_FREQ_HZ 200   // 200Hz sensor reading
+#define SENSOR_READ_FREQ_HZ 100   // 100Hz sensor reading (reduced to prevent watchdog)
 #define MOTOR_UPDATE_FREQ_HZ 100  // 100Hz motor update
 
 // PID Parameters (tune these for your robot)

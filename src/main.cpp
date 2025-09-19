@@ -1,7 +1,9 @@
 #include "balancing_robot.h"
+#include <driver/gpio.h>
+#include <driver/ledc.h>
 
 extern "C" {
-    void app_main(void);
+	void app_main(void);
 }
 
 // Global Variables
@@ -33,14 +35,22 @@ TaskHandle_t control_task_handle = NULL;
 TaskHandle_t motor_task_handle = NULL;
 TaskHandle_t monitor_task_handle = NULL;
 
+// LEDC (PWM) configuration for L298
+static const ledc_mode_t kPwmMode = LEDC_LOW_SPEED_MODE;
+static const ledc_timer_t kPwmTimer = LEDC_TIMER_0;
+static const ledc_timer_bit_t kPwmResolution = LEDC_TIMER_8_BIT; // 0..255
+static const uint32_t kPwmFreqHz = 20000; // 20 kHz to reduce audible noise
+static const ledc_channel_t kLeftPwmChannel = LEDC_CHANNEL_0;
+static const ledc_channel_t kRightPwmChannel = LEDC_CHANNEL_1;
+
 // Initialization Functions
 esp_err_t init_i2c(void) {
     i2c_config_t conf = {};
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = (gpio_num_t)PIN_SDA;
+	conf.mode = I2C_MODE_MASTER;
+	conf.sda_io_num = (gpio_num_t)PIN_SDA;
     conf.scl_io_num = (gpio_num_t)PIN_SCL;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+	conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+	conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
     conf.master.clk_speed = I2C_FREQ_HZ;
     
     esp_err_t ret = i2c_param_config(I2C_NUM, &conf);
@@ -50,7 +60,7 @@ esp_err_t init_i2c(void) {
 }
 
 esp_err_t init_mpu6050(void) {
-    mpu.initialize();
+	mpu.initialize();
     
     if (!mpu.testConnection()) {
         ESP_LOGE("MPU6050", "MPU6050 connection failed!");
@@ -71,9 +81,9 @@ esp_err_t init_mpu6050(void) {
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
     ESP_LOGI("MPU6050", "Calibration complete!");
-    
+
     // Enable DMP
-    mpu.setDMPEnabled(true);
+	mpu.setDMPEnabled(true);
     packetSize = mpu.dmpGetFIFOPacketSize();
     
     ESP_LOGI("MPU6050", "DMP initialized successfully!");
@@ -81,21 +91,57 @@ esp_err_t init_mpu6050(void) {
 }
 
 esp_err_t init_motors(void) {
-    // Configure motor control pins
+    // Configure L298 IN1/IN2 direction pins as outputs
     gpio_config_t io_conf = {};
     io_conf.intr_type = GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pin_bit_mask = (1ULL << MOTOR_LEFT_PWM_PIN) | (1ULL << MOTOR_LEFT_DIR_PIN) |
-                          (1ULL << MOTOR_RIGHT_PWM_PIN) | (1ULL << MOTOR_RIGHT_DIR_PIN);
+    io_conf.pin_bit_mask = (1ULL << MOTOR_LEFT_IN1_PIN) | (1ULL << MOTOR_LEFT_IN2_PIN) |
+                           (1ULL << MOTOR_RIGHT_IN1_PIN) | (1ULL << MOTOR_RIGHT_IN2_PIN);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    
     esp_err_t ret = gpio_config(&io_conf);
     if (ret != ESP_OK) return ret;
-    
-    // Initialize PWM for motor control
-    // Note: You'll need to configure PWM channels based on your motor driver
-    ESP_LOGI("MOTORS", "Motor pins configured");
+
+    // Default direction low
+    gpio_set_level((gpio_num_t)MOTOR_LEFT_IN1_PIN, 0);
+    gpio_set_level((gpio_num_t)MOTOR_LEFT_IN2_PIN, 0);
+    gpio_set_level((gpio_num_t)MOTOR_RIGHT_IN1_PIN, 0);
+    gpio_set_level((gpio_num_t)MOTOR_RIGHT_IN2_PIN, 0);
+
+    // Configure LEDC timer
+    ledc_timer_config_t ledc_timer = {};
+    ledc_timer.speed_mode = kPwmMode;
+    ledc_timer.timer_num = kPwmTimer;
+    ledc_timer.duty_resolution = kPwmResolution;
+    ledc_timer.freq_hz = kPwmFreqHz;
+    ledc_timer.clk_cfg = LEDC_AUTO_CLK;
+    ret = ledc_timer_config(&ledc_timer);
+    if (ret != ESP_OK) return ret;
+
+    // Configure LEDC channels for PWM pins
+    ledc_channel_config_t ch_left = {};
+    ch_left.gpio_num = MOTOR_LEFT_PWM_PIN;
+    ch_left.speed_mode = kPwmMode;
+    ch_left.channel = kLeftPwmChannel;
+    ch_left.intr_type = LEDC_INTR_DISABLE;
+    ch_left.timer_sel = kPwmTimer;
+    ch_left.duty = 0;
+    ch_left.hpoint = 0;
+    ret = ledc_channel_config(&ch_left);
+    if (ret != ESP_OK) return ret;
+
+    ledc_channel_config_t ch_right = {};
+    ch_right.gpio_num = MOTOR_RIGHT_PWM_PIN;
+    ch_right.speed_mode = kPwmMode;
+    ch_right.channel = kRightPwmChannel;
+    ch_right.intr_type = LEDC_INTR_DISABLE;
+    ch_right.timer_sel = kPwmTimer;
+    ch_right.duty = 0;
+    ch_right.hpoint = 0;
+    ret = ledc_channel_config(&ch_right);
+    if (ret != ESP_OK) return ret;
+
+    ESP_LOGI("MOTORS", "L298 motor pins & PWM configured");
     return ESP_OK;
 }
 
@@ -118,28 +164,50 @@ void sensor_task(void *pvParameters) {
     ESP_LOGI("SENSOR", "Sensor task started");
     
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / SENSOR_READ_FREQ_HZ);
+    const uint32_t period_ms = 1000 / SENSOR_READ_FREQ_HZ;
+    const TickType_t xFrequency = pdMS_TO_TICKS(period_ms);
+    
+    ESP_LOGI("SENSOR", "Sensor task frequency: %d Hz, period: %d ms, ticks: %d", 
+             SENSOR_READ_FREQ_HZ, period_ms, (int)xFrequency);
+    
+    // Ensure minimum delay to prevent assertion error
+    if (xFrequency <= 0) {
+        ESP_LOGE("SENSOR", "Invalid frequency calculation, using minimum delay");
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(5)); // 5ms delay as fallback
+        }
+        return;
+    }
     
     while (1) {
         mpuIntStatus = mpu.getIntStatus();
-        fifoCount = mpu.getFIFOCount();
-        
-        if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+		fifoCount = mpu.getFIFOCount();
+
+	    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
             // Reset FIFO if overflow or full
-            mpu.resetFIFO();
-        } else if (mpuIntStatus & 0x02) {
-            // Wait for correct packet size
-            while (fifoCount < packetSize) {
+	        mpu.resetFIFO();
+	    } else if (mpuIntStatus & 0x02) {
+            // Wait for correct packet size with timeout to prevent watchdog
+            uint8_t timeout_count = 0;
+            while (fifoCount < packetSize && timeout_count < 10) {
                 fifoCount = mpu.getFIFOCount();
+                timeout_count++;
+                vTaskDelay(pdMS_TO_TICKS(1)); // Yield control
+            }
+            
+            // Skip if timeout occurred
+            if (timeout_count >= 10) {
+                ESP_LOGW("SENSOR", "FIFO timeout, skipping packet");
+                continue;
             }
             
             // Read packet from FIFO
-            mpu.getFIFOBytes(fifoBuffer, packetSize);
+	        mpu.getFIFOBytes(fifoBuffer, packetSize);
             
             // Extract quaternion and gravity
-            mpu.dmpGetQuaternion(&q, fifoBuffer);
-            mpu.dmpGetGravity(&gravity, &q);
-            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+	 		mpu.dmpGetQuaternion(&q, fifoBuffer);
+			mpu.dmpGetGravity(&gravity, &q);
+			mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
             
             // Get raw sensor data
             int16_t ax, ay, az, gx, gy, gz;
@@ -164,13 +232,20 @@ void sensor_task(void *pvParameters) {
                 xSemaphoreGive(sensor_mutex);
             }
             
+            // Output MPU data to serial monitor
+            printf("MPU Data - Yaw: %.2f°, Pitch: %.2f°, Roll: %.2f° | Gyro: X=%.2f, Y=%.2f, Z=%.2f | Accel: X=%.2f, Y=%.2f, Z=%.2f\n",
+                   sensor_data.yaw, sensor_data.pitch, sensor_data.roll,
+                   sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z,
+                   sensor_data.accel_x, sensor_data.accel_y, sensor_data.accel_z);
+            
             // Send to control queue
             if (xQueueSend(control_queue, &sensor_data, 0) != pdTRUE) {
                 ESP_LOGW("SENSOR", "Control queue full, dropping sensor data");
             }
         }
         
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        // Use simple delay instead of vTaskDelayUntil for sensor task
+        vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay (100Hz max) to prevent watchdog timeout
     }
 }
 
@@ -180,6 +255,13 @@ void control_task(void *pvParameters) {
     
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
+    
+    // Ensure minimum delay to prevent assertion error
+    if (xFrequency <= 0) {
+        ESP_LOGE("CONTROL", "Invalid frequency calculation, using minimum delay");
+        vTaskDelay(pdMS_TO_TICKS(1));
+        return;
+    }
     
     sensor_data_t sensor_data;
     control_data_t control_data;
@@ -212,6 +294,13 @@ void motor_task(void *pvParameters) {
     
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / MOTOR_UPDATE_FREQ_HZ);
+    
+    // Ensure minimum delay to prevent assertion error
+    if (xFrequency <= 0) {
+        ESP_LOGE("MOTOR", "Invalid frequency calculation, using minimum delay");
+        vTaskDelay(pdMS_TO_TICKS(1));
+        return;
+    }
     
     control_data_t control_data;
     
@@ -252,9 +341,16 @@ void monitor_task(void *pvParameters) {
             xSemaphoreGive(control_mutex);
         }
         
-        // Log status
-        ESP_LOGI("MONITOR", "Pitch: %.2f°, Roll: %.2f°, Left: %.1f, Right: %.1f",
-                sensor_data.pitch, sensor_data.roll,
+        // Log detailed status
+        ESP_LOGI("MONITOR", "=== Robot Status ===");
+        ESP_LOGI("MONITOR", "Attitude - Yaw: %.2f°, Pitch: %.2f°, Roll: %.2f°", 
+                sensor_data.yaw, sensor_data.pitch, sensor_data.roll);
+        ESP_LOGI("MONITOR", "Gyro - X: %.2f°/s, Y: %.2f°/s, Z: %.2f°/s", 
+                sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z);
+        ESP_LOGI("MONITOR", "Accel - X: %.2fg, Y: %.2fg, Z: %.2fg", 
+                sensor_data.accel_x, sensor_data.accel_y, sensor_data.accel_z);
+        ESP_LOGI("MONITOR", "Control - Angle: %.1f, Speed: %.1f, Left: %.1f, Right: %.1f",
+                control_data.angle_output, control_data.speed_output,
                 control_data.left_motor_speed, control_data.right_motor_speed);
         
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -308,12 +404,13 @@ void balance_control(sensor_data_t *sensor_data, control_data_t *control_data) {
         ESP_LOGW("CONTROL", "Emergency stop! Angle: %.2f°", sensor_data->pitch);
         return;
     }
-    
-    // Calculate angle PID output (pitch control)
-    float angle_output = calculate_pid(&angle_pid, 0.0f, sensor_data->pitch, dt);
-    
+        
     // Calculate speed PID output (if you have encoders)
     float speed_output = calculate_pid(&speed_pid, 0.0f, 0.0f, dt); // Placeholder
+    
+    // Calculate angle PID output (pitch control)
+    float angle_output = calculate_pid(&angle_pid, speed_output, sensor_data->pitch, dt);
+
     
     // Combine outputs
     float left_speed = angle_output + speed_output;
@@ -332,21 +429,23 @@ void balance_control(sensor_data_t *sensor_data, control_data_t *control_data) {
 
 // Motor Control Functions
 void set_motor_speed(int motor, float speed) {
-    // Convert speed (-255 to 255) to PWM and direction
+    // Convert speed (-255 to 255) to PWM and direction using IN1/IN2
     int pwm_value = (int)fabs(speed);
-    bool direction = speed >= 0;
-    
-    // Constrain PWM value
     if (pwm_value > MAX_MOTOR_SPEED) pwm_value = MAX_MOTOR_SPEED;
-    
+    bool forward = speed >= 0.0f;
+
     if (motor == 0) { // Left motor
-        gpio_set_level((gpio_num_t)MOTOR_LEFT_DIR_PIN, direction);
-        // Set PWM here - you'll need to implement PWM control
-        // ledcWrite(MOTOR_LEFT_PWM_CHANNEL, pwm_value);
+        // Direction
+        gpio_set_level((gpio_num_t)MOTOR_LEFT_IN1_PIN, forward ? 1 : 0);
+        gpio_set_level((gpio_num_t)MOTOR_LEFT_IN2_PIN, forward ? 0 : 1);
+        // PWM
+        ledc_set_duty(kPwmMode, kLeftPwmChannel, pwm_value);
+        ledc_update_duty(kPwmMode, kLeftPwmChannel);
     } else { // Right motor
-        gpio_set_level((gpio_num_t)MOTOR_RIGHT_DIR_PIN, direction);
-        // Set PWM here - you'll need to implement PWM control
-        // ledcWrite(MOTOR_RIGHT_PWM_CHANNEL, pwm_value);
+        gpio_set_level((gpio_num_t)MOTOR_RIGHT_IN1_PIN, forward ? 1 : 0);
+        gpio_set_level((gpio_num_t)MOTOR_RIGHT_IN2_PIN, forward ? 0 : 1);
+        ledc_set_duty(kPwmMode, kRightPwmChannel, pwm_value);
+        ledc_update_duty(kPwmMode, kRightPwmChannel);
     }
 }
 
@@ -392,4 +491,6 @@ void app_main(void) {
     
     ESP_LOGI("MAIN", "All tasks created successfully!");
     ESP_LOGI("MAIN", "Self-balancing robot is running...");
+    ESP_LOGI("MAIN", "MPU Data Format: Yaw, Pitch, Roll (degrees) | Gyro X,Y,Z (deg/s) | Accel X,Y,Z (g)");
+    ESP_LOGI("MAIN", "Monitor will show detailed status every second");
 }
