@@ -26,7 +26,7 @@ esp_err_t motor_init(void)
     /* Init PWM channel */
     mcpwm_config_t pwm_conf =
     {
-        .frequency = 2000,         /* 10k Hz to reduce noise */
+        .frequency = 200,         /* 10k Hz to reduce noise */
         .cmpr_a = 0,                /* Initial duty cycle */          
         .cmpr_b = 0,                /* Initial duty cycle */
         .duty_mode = MCPWM_DUTY_MODE_0,
@@ -51,12 +51,15 @@ esp_err_t motor_init(void)
  */
 esp_err_t motor_control(float *speed)
 {
+    float abs_speed = *speed;
+    
     if (*speed < 0)
     {
         gpio_set_level((gpio_num_t)MOTOR_IN1_PIN, 0);
         gpio_set_level((gpio_num_t)MOTOR_IN2_PIN, 1);
         gpio_set_level((gpio_num_t)MOTOR_IN3_PIN, 1);
         gpio_set_level((gpio_num_t)MOTOR_IN4_PIN, 0);
+        abs_speed = -*speed;
     }
     else
     {
@@ -65,24 +68,29 @@ esp_err_t motor_control(float *speed)
         gpio_set_level((gpio_num_t)MOTOR_IN3_PIN, 0);
         gpio_set_level((gpio_num_t)MOTOR_IN4_PIN, 1);
     }
-    
-    mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, *speed); /* Druve Motor A */
-    mcpwm_set_duty(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, *speed); /* Drive Motor B */
+    (abs_speed > 255.0f) ? abs_speed = 255.0f : abs_speed = abs_speed;
+    (abs_speed < 38.25f) ? abs_speed = 38.2f : abs_speed = abs_speed;
+    mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, (abs_speed/255.0f)*100.0f); /* Druve Motor A */
+    mcpwm_set_duty(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, (abs_speed/255.0f)*100.0f); /* Drive Motor B */
     return ESP_OK;
 }
 
-/* Motor task */
+/**
+ * @brief Task to update motor control at a fixed frequency
+ */
 void motor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / MOTOR_UPDATE_FREQ_HZ);
     motor_init();
+
+    
+    float speed = 50; // Test speed value
     while (1)
     {
-        motor_control((float[]){100});
+        motor_control(&speed);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
-   
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
 }
 
 
