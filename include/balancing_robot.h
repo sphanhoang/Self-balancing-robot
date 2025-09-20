@@ -26,12 +26,12 @@
 #define I2C_FREQ_HZ 400000
 
 // Motor Control Pins (adjust according to your motor driver)
-#define MOTOR_LEFT_PWM_PIN 14
-#define MOTOR_LEFT_IN1_PIN 27
-#define MOTOR_LEFT_IN2_PIN 26
-#define MOTOR_RIGHT_PWM_PIN 32
-#define MOTOR_RIGHT_IN1_PIN 25
-#define MOTOR_RIGHT_IN2_PIN 33
+#define MOTOR_ENA_PIN   14
+#define MOTOR_ENB_PIN   32
+#define MOTOR_IN1_PIN   27
+#define MOTOR_IN2_PIN   26
+#define MOTOR_IN3_PIN   25
+#define MOTOR_IN4_PIN   33
 
 // Task Priorities (higher number = higher priority)
 #define SENSOR_TASK_PRIORITY 5
@@ -42,13 +42,13 @@
 // Task Stack Sizes
 #define SENSOR_TASK_STACK_SIZE 4096
 #define CONTROL_TASK_STACK_SIZE 4096
-#define MOTOR_TASK_STACK_SIZE 2048
+#define MOTOR_TASK_STACK_SIZE 4096  // Increased from 2048 to prevent stack overflow
 #define MONITOR_TASK_STACK_SIZE 2048
 
 // Control Parameters
-#define CONTROL_LOOP_FREQ_HZ 100  // 100Hz control loop
-#define SENSOR_READ_FREQ_HZ 100   // 100Hz sensor reading (reduced to prevent watchdog)
-#define MOTOR_UPDATE_FREQ_HZ 100  // 100Hz motor update
+#define CONTROL_LOOP_FREQ_HZ 50   // 50Hz control loop (reduced to prevent watchdog)
+#define SENSOR_READ_FREQ_HZ 50    // 50Hz sensor reading (reduced to prevent watchdog)
+#define MOTOR_UPDATE_FREQ_HZ 50   // 50Hz motor update
 
 // PID Parameters (tune these for your robot)
 #define KP_ANGLE 50.0f
@@ -60,7 +60,8 @@
 #define KD_SPEED 0.0f
 
 // Safety Limits
-#define MAX_MOTOR_SPEED 255
+#define MAX_MOTOR_SPEED 255.0f
+#define MIN_MOTOR_SPEED 38.25f
 #define MAX_ANGLE_DEVIATION 30.0f  // degrees
 #define EMERGENCY_STOP_ANGLE 45.0f // degrees
 
