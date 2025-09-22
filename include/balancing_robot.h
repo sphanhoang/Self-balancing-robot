@@ -30,19 +30,24 @@
 
 /* Motor constrains */
 #define MAX_MOTOR_SPEED 255.0f
-#define MIN_MOTOR_SPEED 38.25f
+#define MIN_MOTOR_SPEED 10.0f           //38.25
+#define MAX_ANGLE       15.0f           /* degrees */
+#define MIN_ANGLE       -MAX_ANGLE      /* degrees */
+#define PWM_FREQ_HZ     100             /* Hz */
 
 /* PID parameter */
-#define KP_ROLL 15.0f
-#define KI_ROLL 5.0f
-#define KD_ROLL 1.0f
-#define KP_YAW 5.0f
-#define KI_YAW 0.0f
-#define KD_YAW 0.0f
+#define KP_ROLL 20.0f /* best results so far: P = 25, I = 2, D = .8*/
+#define KI_ROLL 2.0f
+#define KD_ROLL 0.8f
+#define KP_SPEED 0.2f
+#define KI_SPEED 0.0f
+#define KD_SPEED 0.0f
 
 /* PID constraints */
-#define PID_INTEGRAL_CLAMP 50.0f
-#define PID_OUTPUT_CLAMP 255.0f
+#define ROLL_PID_INTEGRAL_CLAMP 50.0f
+#define ROLL_PID_OUTPUT_CLAMP 255.0f
+#define SPEED_PID_INTEGRAL_CLAMP 50.0f
+#define SPEED_PID_OUTPUT_CLAMP 255.0f
 
 /* Task freq */
 #define MOTOR_UPDATE_FREQ_HZ 100  /* 100Hz */ 
@@ -78,7 +83,7 @@ typedef struct
 typedef struct 
 {
     float roll_output;
-    float yawRate_output;
+    float speed_output;
     float left_motor_speed;
     float right_motor_speed;
     float left_motor_feedback;
@@ -90,7 +95,7 @@ void initI2C(void);
 void mpu_setup(MPU6050 &mpu);
 void sensor_task (void *pvParameters);
 float compute_pid(pid_controller_t *pid, float setpoint, float feedback, float dt);
-void control_task(void *pvParameters);
+void balance_task(void *pvParameters);
 esp_err_t motor_init(void);
 void set_motor_speed(int motor, float *speed);
 void motor_task (void *pvParameters);
