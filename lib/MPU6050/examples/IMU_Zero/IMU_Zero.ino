@@ -121,14 +121,6 @@ const int LinesBetweenHeaders = 5;
       int LinesOut;
       int N;
       
-
-void SetAveraging(int NewN)
-  { N = NewN;
-    Serial.print("averaging ");
-    Serial.print(N);
-    Serial.println(" readings each time");
-   } // SetAveraging
-
 void ForceHeader()
   { LinesOut = 99; }
     
@@ -336,6 +328,13 @@ void PullBracketsOut()
           }
      } // keep going
   } // PullBracketsOut
+
+void SetAveraging(int NewN)
+  { N = NewN;
+    Serial.print("averaging ");
+    Serial.print(N);
+    Serial.println(" readings each time");
+   } // SetAveraging
 
 void setup()
   { Initialize();
