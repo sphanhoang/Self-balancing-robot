@@ -7,22 +7,55 @@ extern "C" {
 	void app_main(void);
 }
 
-// Global Variables
-QueueHandle_t sensor_queue;
-QueueHandle_t control_queue;
-SemaphoreHandle_t sensor_mutex;
-SemaphoreHandle_t control_mutex;
+/* Init angle PID controller */
+pid_controller_t roll_pid = 
+{
+    .setpoint = 0.0f,
+    .kp = KP_ROLL,
+    .ki = KI_ROLL,
+    .kd = KD_ROLL,
+    .integral = 0.0f,
+    .previous_error = 0.0f,
+    .output = 0.0f
+};
 
-sensor_data_t current_sensor_data;
-control_data_t current_control_data;
+pid_controller_t yawRate_pid = 
+{
+    .setpoint = 0.0f,
+    .kp = KP_YAW,
+    .ki = KI_YAW,
+    .kd = KD_YAW,
+    .integral = 0.0f,
+    .previous_error = 0.0f,
+    .output = 0.0f
+};
 
-// MPU6050 instance
-MPU6050 mpu;
-Quaternion q;
-VectorFloat gravity;
-float ypr[3];
-uint16_t packetSize = 42;
-uint16_t fifoCount;
+control_data_t control_data = 
+{
+    .roll_output = 0.0f,
+    .yawRate_output = 0.0f,
+    .left_motor_speed = 0.0f,
+    .right_motor_speed = 0.0f,
+    .left_motor_feedback = 0.0f,
+    .right_motor_feedback = 0.0f,
+    .timestamp = 0
+};
+
+sensor_data_t sensor_data = 
+{
+    .yaw = 0.0f,
+    .pitch = 0.0f,
+    .roll = 0.0f,
+    // .gyro_x = 0.0f,
+    // .gyro_y = 0.0f,
+    // .gyro_z = 0.0f,
+    .accel_x = 0.0f,
+    .accel_y = 0.0f,
+    .accel_z = 0.0f,
+    .timestamp = 0
+};
+
+uint16_t packetSize;
 uint8_t fifoBuffer[64];
 uint8_t mpuIntStatus;
 
@@ -41,36 +74,39 @@ esp_err_t init_i2c(void) {
     i2c_config_t conf = {};
 	conf.mode = I2C_MODE_MASTER;
 	conf.sda_io_num = (gpio_num_t)PIN_SDA;
-    conf.scl_io_num = (gpio_num_t)PIN_SCL;
+	conf.scl_io_num = (gpio_num_t)PIN_CLK;
 	conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
 	conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = I2C_FREQ_HZ;
-    
-    esp_err_t ret = i2c_param_config(I2C_NUM, &conf);
-    if (ret != ESP_OK) return ret;
-    
-    return i2c_driver_install(I2C_NUM, I2C_MODE_MASTER, 0, 0, 0);
+	conf.master.clk_speed = 400000;
+	ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
+	ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
 }
 
-esp_err_t init_mpu6050(void) {
-	mpu.initialize();
-    
-    if (!mpu.testConnection()) {
-        ESP_LOGE("MPU6050", "MPU6050 connection failed!");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI("MPU6050", "MPU6050 connection successful!");
-    
-    // Initialize DMP
+/**
+ * @brief MPU 6050 init
+ */
+ void mpu_setup(MPU6050 &mpu)
+{
+    initI2C();
+    mpu.initialize();
+    //   pinMode(INTERRUPT_PIN, INPUT);
+
+    // verify connection
+    ESP_LOGI(TAG_MPU, "Testing device connections...");
+    ESP_LOGI(TAG_MPU, "%s", mpu.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
+
+    // load and configure the DMP
+    ESP_LOGI(TAG_MPU, "Initializing DMP...");
     uint8_t devStatus = mpu.dmpInitialize();
-    if (devStatus != 0) {
-        ESP_LOGE("MPU6050", "DMP initialization failed (code %d)", devStatus);
-        return ESP_FAIL;
-    }
-    
-    // Calibrate sensors
-    ESP_LOGI("MPU6050", "Calibrating sensors...");
+
+    // calib
+    mpu.setXAccelOffset(-2134);
+    mpu.setYAccelOffset(-56);
+    mpu.setZAccelOffset(1464);
+    mpu.setXGyroOffset(-103);
+    mpu.setYGyroOffset(155);
+    mpu.setZGyroOffset(36);
+    // 
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
     ESP_LOGI("MPU6050", "Calibration complete!");
@@ -243,10 +279,11 @@ void sensor_task(void *pvParameters) {
     }
 }
 
-// Control Task - Implements PID control for balancing
-void control_task(void *pvParameters) {
-    ESP_LOGI("CONTROL", "Control task started");
-    
+/**
+ * @brief Balance control loop task
+ */
+void control_task (void *pvParameters)
+{
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
     
@@ -289,42 +326,17 @@ void motor_task(void *pvParameters) {
         
         vTaskDelay(delay_ticks);
     }
+    vTaskDelete(NULL);
 }
+/////////////////////////            Monitor Task           ////////////////////////
 
-// Monitor Task - Logs system status
-void monitor_task(void *pvParameters) {
-    ESP_LOGI("MONITOR", "Monitor task started");
-    
+void monitor_task (void *pvParameters)
+{
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(1000); // 1Hz
-    
-    while (1) {
-        sensor_data_t sensor_data;
-        control_data_t control_data;
-        
-        // Get current data
-        if (xSemaphoreTake(sensor_mutex, 100 / portTICK_PERIOD_MS)) {
-            sensor_data = current_sensor_data;
-            xSemaphoreGive(sensor_mutex);
-        }
-        
-        if (xSemaphoreTake(control_mutex, 100 / portTICK_PERIOD_MS)) {
-            control_data = current_control_data;
-            xSemaphoreGive(control_mutex);
-        }
-        
-        // Log detailed status
-        ESP_LOGI("MONITOR", "=== Robot Status ===");
-        ESP_LOGI("MONITOR", "Attitude - Yaw: %.2f°, Pitch: %.2f°, Roll: %.2f°", 
-                sensor_data.yaw, sensor_data.pitch, sensor_data.roll);
-        ESP_LOGI("MONITOR", "Gyro - X: %.2f°/s, Y: %.2f°/s, Z: %.2f°/s", 
-                sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z);
-        ESP_LOGI("MONITOR", "Accel - X: %.2fg, Y: %.2fg, Z: %.2fg", 
-                sensor_data.accel_x, sensor_data.accel_y, sensor_data.accel_z);
-        ESP_LOGI("MONITOR", "Control - Angle: %.1f, Speed: %.1f, Left: %.1f, Right: %.1f",
-                control_data.angle_output, control_data.speed_output,
-                control_data.left_motor_speed, control_data.right_motor_speed);
-        
+    const TickType_t xFrequency = pdMS_TO_TICKS(200); // 1 second
+    while (1)
+    {
+        printf("ROLL: %3.1f, PID integral: %3.1f, Control Roll output: %3.1f \n", sensor_data.roll, roll_pid.integral, control_data.roll_output);
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
