@@ -85,3 +85,13 @@ typedef struct
     float right_motor_feedback;
     uint32_t timestamp;
 } control_data_t;
+
+void initI2C(void);
+void mpu_setup(MPU6050 &mpu);
+void sensor_task (void *pvParameters);
+float compute_pid(pid_controller_t *pid, float setpoint, float feedback, float dt);
+void control_task(void *pvParameters);
+esp_err_t motor_init(void);
+void set_motor_speed(int motor, float *speed);
+void motor_task (void *pvParameters);
+void monitor_task(void *pvParameters);

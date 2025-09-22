@@ -1,7 +1,13 @@
-#include "balancing_robot.h"
-#include <driver/gpio.h>
-#include "driver/mcpwm.h"
-#include "soc/mcpwm_periph.h"
+/**
+ * @file main.cpp
+ * @brief Self-balancing robot control logic
+ * @author Son Phan
+ * @date Sept 2025
+ */
+
+#include "balance_robot.h"
+
+static const char *TAG_MPU = "MPU";
 
 extern "C" {
 	void app_main(void);
@@ -57,21 +63,15 @@ sensor_data_t sensor_data =
 
 uint16_t packetSize;
 uint8_t fifoBuffer[64];
-uint8_t mpuIntStatus;
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+VectorInt16 aa, aaReal;        // [x, y, z]            accel sensor measurements
 
-// PID Controllers
-pid_controller_t angle_pid;
-pid_controller_t speed_pid;
-
-// Task Handles
-TaskHandle_t sensor_task_handle = NULL;
-TaskHandle_t control_task_handle = NULL;
-TaskHandle_t motor_task_handle = NULL;
-TaskHandle_t monitor_task_handle = NULL;
-
-// Initialization Functions
-esp_err_t init_i2c(void) {
-    i2c_config_t conf = {};
+////////////////////////            SENSOR SECTION          ////////////////////////
+void initI2C(void) 
+{
+	i2c_config_t conf;
 	conf.mode = I2C_MODE_MASTER;
 	conf.sda_io_num = (gpio_num_t)PIN_SDA;
 	conf.scl_io_num = (gpio_num_t)PIN_CLK;
@@ -85,7 +85,7 @@ esp_err_t init_i2c(void) {
 /**
  * @brief MPU 6050 init
  */
- void mpu_setup(MPU6050 &mpu)
+void mpu_setup(MPU6050 &mpu)
 {
     initI2C();
     mpu.initialize();
@@ -109,19 +109,132 @@ esp_err_t init_i2c(void) {
     // 
     mpu.CalibrateAccel(6);
     mpu.CalibrateGyro(6);
-    ESP_LOGI("MPU6050", "Calibration complete!");
 
-    // Enable DMP
-	mpu.setDMPEnabled(true);
-    packetSize = mpu.dmpGetFIFOPacketSize();
-    
-    ESP_LOGI("MPU6050", "DMP initialized successfully!");
-    return ESP_OK;
+    // make sure it worked (returns 0 if so)
+    if (devStatus == 0) 
+    {
+        // turn on the DMP, now that it's ready
+        ESP_LOGI(TAG_MPU, "Enabling DMP...");
+        mpu.setDMPEnabled(true);
+
+        // enable Arduino interrupt detection
+        // Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+        // attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
+        // mpuIntStatus = mpu.getIntStatus();
+
+        // set our DMP Ready flag so the main loop() function knows it's okay to use it
+        // ESP_LOGI(TAG_MPU, "DMP ready! Waiting for first interrupt...");
+        // dmpReady = true;
+
+        // get expected DMP packet size for later comparison
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    } 
+    else 
+    {
+        // ERROR!
+        // 1 = initial memory load failed
+        // 2 = DMP configuration updates failed
+        // (if it's going to break, usually the code will be 1)
+        ESP_LOGE(TAG_MPU, "DMP Initialization failed (code ");
+        ESP_LOGI(TAG_MPU, "%d", devStatus);
+        ESP_LOGI(TAG_MPU, ")");
+    } 
+}   
+
+
+/**
+ * @brief Reading data from MPU 6050 task
+ */
+void sensor_task (void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / SENSOR_READ_FREQ_HZ);
+    MPU6050 mpu = MPU6050();
+    mpu_setup(mpu);
+    while (1)
+    {
+        // Read sensor data here
+        // Clear the buffer so as we can get fresh values
+        // The sensor is running a lot faster than our sample period
+        mpu.resetFIFO();
+        
+        // get current FIFO count
+        uint16_t fifoCount = mpu.getFIFOCount();
+        
+        // wait for correct available data length, should be a VERY short wait
+        while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+        // read a packet from FIFO
+        mpu.getFIFOBytes(fifoBuffer, packetSize);
+        mpu.dmpGetQuaternion(&q, fifoBuffer);
+        mpu.dmpGetAccel(&aa, fifoBuffer);
+        mpu.dmpGetGravity(&gravity, &q);
+        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+        mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+        sensor_data.yaw = ypr[0] * 180/M_PI;
+        sensor_data.pitch = ypr[1] * 180/M_PI;
+        sensor_data.roll = ypr[2] * 180/M_PI;
+        sensor_data.accel_x = aaReal.x;
+        sensor_data.accel_y = aaReal.y;
+        sensor_data.accel_z = aaReal.z;
+        sensor_data.timestamp = xTaskGetTickCount();
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+    vTaskDelete(NULL);
 }
 
-esp_err_t init_motors(void) {
-    // Configure L298 IN1/IN2 direction pins as outputs
-   /* Control pins */
+////////////////////////            CONTROL SECTION         ////////////////////////
+
+/**
+ * @brief PID controller computation
+ * @param *pid Pointer to PID variable
+ * @param setpoint target value
+ * @param feedback sensor feedback value
+ * @param dt time difference in seconds
+ * @return PID output
+ */
+float compute_pid(pid_controller_t *pid, float setpoint, float feedback, float dt)
+{
+    float error = setpoint - feedback;
+    pid->integral += error * dt;
+    pid->integral = pid->integral > PID_INTEGRAL_CLAMP ? PID_INTEGRAL_CLAMP : (pid->integral < -PID_INTEGRAL_CLAMP ? -PID_INTEGRAL_CLAMP : pid->integral);
+    float derivative = (error - pid->previous_error) / dt;
+    pid->output = (pid->kp * error) + (pid->ki * pid->integral) + (pid->kd * derivative);
+    pid->output = pid->output > PID_OUTPUT_CLAMP ? PID_OUTPUT_CLAMP : (pid->output < -PID_OUTPUT_CLAMP ? -PID_OUTPUT_CLAMP : pid->output);
+    pid->previous_error = error;
+    return pid->output;
+}
+
+/**
+ * @brief Balance control loop task
+ */
+void control_task (void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
+    float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
+    // float speed_feedback = (control_data.left_motor_feedback + control_data.right_motor_feedback) / 2.0f;
+    while (1)
+    {
+        // control logic here
+        // control_data.yawRate_output = compute_pid(&yawRate_pid, 0.0f, sensor_data.yaw, dt);
+        control_data.roll_output = compute_pid(&roll_pid, 0.0f, sensor_data.roll, dt);
+        control_data.left_motor_speed = control_data.roll_output + control_data.yawRate_output;
+        control_data.right_motor_speed = control_data.roll_output + + control_data.yawRate_output;
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+    vTaskDelete(NULL);
+}
+
+////////////////////////            MOTOR SECTION           ////////////////////////
+
+/**
+ * @brief Initialize pins and PWM channels to drive the motor
+ * @note  None
+ */ 
+esp_err_t motor_init(void)
+{
+    /* Control pins */
     gpio_config_t motor_io_conf = 
     {
         .pin_bit_mask = (1ULL << MOTOR_IN1_PIN) | (1ULL << MOTOR_IN2_PIN) | 
@@ -137,7 +250,7 @@ esp_err_t init_motors(void) {
     /* Init PWM channel */
     mcpwm_config_t pwm_conf =
     {
-        .frequency = 20000,         /* 20kHz to reduce noise */
+        .frequency = 200,           /* 200 Hz */
         .cmpr_a = 0,                /* Initial duty cycle */          
         .cmpr_b = 0,                /* Initial duty cycle */
         .duty_mode = MCPWM_DUTY_MODE_0,
@@ -147,184 +260,69 @@ esp_err_t init_motors(void) {
     /* Init MCPWM for Motor A (GPIO 14) */
     mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, MOTOR_ENA_PIN);
     ret = mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_conf);
-    if (ret != ESP_OK) { 
-        ESP_LOGE("MOTORS", "Failed to init MCPWM Unit 0: %s", esp_err_to_name(ret));
-        return ret; 
-    }
+    if (ret != ESP_OK) { return ret; }
 
     /* Init MCPWM for Motor B (GPIO 32) */
     mcpwm_gpio_init(MCPWM_UNIT_1, MCPWM0A, MOTOR_ENB_PIN);
     ret = mcpwm_init(MCPWM_UNIT_1, MCPWM_TIMER_0, &pwm_conf);
-    if (ret != ESP_OK) { 
-        ESP_LOGE("MOTORS", "Failed to init MCPWM Unit 1: %s", esp_err_to_name(ret));
-        return ret; 
-    }
-    
-    // Start the MCPWM timers
-    mcpwm_start(MCPWM_UNIT_0, MCPWM_TIMER_0);
-    mcpwm_start(MCPWM_UNIT_1, MCPWM_TIMER_0);
-
-    ESP_LOGI("MOTORS", "L298 motor pins & PWM configured");
+    if (ret != ESP_OK) { return ret; }
     return ESP_OK;
 }
 
-esp_err_t init_queues_and_semaphores(void) {
-    sensor_queue = xQueueCreate(10, sizeof(sensor_data_t));  // Increased from 5 to 10
-    control_queue = xQueueCreate(10, sizeof(control_data_t)); // Increased from 5 to 10
-    sensor_mutex = xSemaphoreCreateMutex();
-    control_mutex = xSemaphoreCreateMutex();
-    
-    if (!sensor_queue || !control_queue || !sensor_mutex || !control_mutex) {
-        ESP_LOGE("INIT", "Failed to create queues or semaphores");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI("INIT", "Queues created: sensor=10, control=10");
-    return ESP_OK;
-}
+/**
+ * @brief Motor control
+ * @param motor Motor index (0 = right, 1 = left)
+ * @note Pretty self-explanatory isn't it?
+ */
+void set_motor_speed(int motor, float *speed)
+{
+    float abs_speed = *speed > 0 ? *speed : -*speed;
+    bool forward = *speed >= 0.0f; 
 
-// Sensor Task - Reads MPU6050 data using DMP
-void sensor_task(void *pvParameters) {
-    ESP_LOGI("SENSOR", "Sensor task started");
-    
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    const uint32_t period_ms = 1000 / SENSOR_READ_FREQ_HZ;
-    const TickType_t xFrequency = pdMS_TO_TICKS(period_ms);
-    
-    ESP_LOGI("SENSOR", "Sensor task frequency: %d Hz, period: %d ms, ticks: %d", 
-             SENSOR_READ_FREQ_HZ, period_ms, (int)xFrequency);
-    
-    // Ensure minimum delay to prevent assertion error
-    if (xFrequency <= 0) {
-        ESP_LOGE("SENSOR", "Invalid frequency calculation, using minimum delay");
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(5)); // 5ms delay as fallback
-        }
-        return;
-    }
-    
-    while (1) {
-	    mpuIntStatus = mpu.getIntStatus();
-		fifoCount = mpu.getFIFOCount();
+    // Constrain speed
+    if (abs_speed > MAX_MOTOR_SPEED) abs_speed = MAX_MOTOR_SPEED;
+    if (abs_speed < MIN_MOTOR_SPEED && abs_speed > 5) abs_speed = MIN_MOTOR_SPEED;
 
-	    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
-            // Reset FIFO if overflow or full
-	        mpu.resetFIFO();
-	    } else if (mpuIntStatus & 0x02) {
-            // Wait for correct packet size with timeout to prevent watchdog
-            uint8_t timeout_count = 0;
-            while (fifoCount < packetSize && timeout_count < 10) {
-                fifoCount = mpu.getFIFOCount();
-                timeout_count++;
-                vTaskDelay(pdMS_TO_TICKS(1)); // Yield control
-            }
-            
-            // Skip if timeout occurred
-            if (timeout_count >= 10) {
-                ESP_LOGW("SENSOR", "FIFO timeout, skipping packet");
-                continue;
-            }
-            
-            // Read packet from FIFO
-	        mpu.getFIFOBytes(fifoBuffer, packetSize);
-            
-            // Extract quaternion and gravity
-	 		mpu.dmpGetQuaternion(&q, fifoBuffer);
-			mpu.dmpGetGravity(&gravity, &q);
-			mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-            
-            // Get raw sensor data
-            int16_t ax, ay, az, gx, gy, gz;
-            mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-            
-            // Prepare sensor data
-            sensor_data_t sensor_data = {};
-            sensor_data.yaw = ypr[0] * 180.0f / M_PI;
-            sensor_data.pitch = ypr[1] * 180.0f / M_PI;
-            sensor_data.roll = ypr[2] * 180.0f / M_PI;
-            sensor_data.gyro_x = gx / 131.0f;  // Convert to deg/s
-            sensor_data.gyro_y = gy / 131.0f;
-            sensor_data.gyro_z = gz / 131.0f;
-            sensor_data.accel_x = ax / 16384.0f;  // Convert to g
-            sensor_data.accel_y = ay / 16384.0f;
-            sensor_data.accel_z = az / 16384.0f;
-            sensor_data.timestamp = xTaskGetTickCount();
-            
-            // Update global sensor data with mutex protection
-            if (xSemaphoreTake(sensor_mutex, portMAX_DELAY)) {
-                current_sensor_data = sensor_data;
-                xSemaphoreGive(sensor_mutex);
-            }
-            
-            // Output MPU data to serial monitor (commented out to reduce spam)
-            // printf("MPU Data - Yaw: %.2f°, Pitch: %.2f°, Roll: %.2f° | Gyro: X=%.2f, Y=%.2f, Z=%.2f | Accel: X=%.2f, Y=%.2f, Z=%.2f\n",
-            //        sensor_data.yaw, sensor_data.pitch, sensor_data.roll,
-            //        sensor_data.gyro_x, sensor_data.gyro_y, sensor_data.gyro_z,
-            //        sensor_data.accel_x, sensor_data.accel_y, sensor_data.accel_z);
-            
-            // Send to control queue with timeout to prevent blocking
-            if (xQueueSend(control_queue, &sensor_data, 10 / portTICK_PERIOD_MS) != pdTRUE) {
-                // Only log warning occasionally to reduce spam
-                static uint32_t last_warning = 0;
-                uint32_t now = xTaskGetTickCount();
-                if (now - last_warning > pdMS_TO_TICKS(1000)) { // Log max once per second
-                    ESP_LOGW("SENSOR", "Control queue full, dropping sensor data");
-                    last_warning = now;
-                }
-            }
-        }
+
+    if (motor == 0) 
+    { // Left motor (Motor A)
+        // Set direction pins for left motor only
+        gpio_set_level((gpio_num_t)MOTOR_IN1_PIN, forward ? 0 : 1);
+        gpio_set_level((gpio_num_t)MOTOR_IN2_PIN, forward ? 1 : 0);
         
-        // Use simple delay instead of vTaskDelayUntil for sensor task
-        vTaskDelay(pdMS_TO_TICKS(20)); // 20ms delay (50Hz max) to prevent watchdog timeout
+        // Set PWM duty cycle
+        float duty_percent = (abs_speed / 255.0f) * 100.0f;
+        mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_percent);
+        mcpwm_set_duty_type(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
+        // ESP_LOGI("MOTOR", "Left motor: speed=%.1f, abs=%.1f, duty=%.1f%%, forward=%d", 
+        //         speed, abs_speed, duty_percent, forward);
+    }
+    else if (motor == 1) 
+    { // Right motor (Motor B)
+        // Set direction pins for right motor only
+        gpio_set_level((gpio_num_t)MOTOR_IN3_PIN, forward ? 1 : 0);
+        gpio_set_level((gpio_num_t)MOTOR_IN4_PIN, forward ? 0 : 1);
+
+         // Set PWM duty cycle
+        float duty_percent = (abs_speed / 255.0f) * 100.0f;
+        mcpwm_set_duty(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, duty_percent);
+        mcpwm_set_duty_type(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
     }
 }
 
 /**
- * @brief Balance control loop task
+ * @brief Drive motor task
  */
-void control_task (void *pvParameters)
+void motor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
-    
-    sensor_data_t sensor_data;
-    control_data_t control_data;
-    
-    while (1) {
-        // Process one sensor data per loop iteration
-        if (xQueueReceive(control_queue, &sensor_data, 0) == pdTRUE) {
-            // Implement balance control
-            balance_control(&sensor_data, &control_data);
-            
-            // Update global control data with mutex protection
-            if (xSemaphoreTake(control_mutex, 10 / portTICK_PERIOD_MS)) {
-                current_control_data = control_data;
-                xSemaphoreGive(control_mutex);
-            }
-        }
-        
-        // Use proper timing to prevent watchdog timeout
+    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / MOTOR_UPDATE_FREQ_HZ);
+    motor_init();
+    while (1)
+    {
+        set_motor_speed(0, &control_data.right_motor_speed);
+        set_motor_speed(1, &control_data.left_motor_speed);
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
-    }
-}
-
-// Motor Task - Controls motor speeds
-void motor_task(void *pvParameters) {
-    ESP_LOGI("MOTOR", "Motor task started");
-    
-    // Use simple delay instead of vTaskDelayUntil to reduce stack usage
-    const TickType_t delay_ticks = pdMS_TO_TICKS(1000 / MOTOR_UPDATE_FREQ_HZ);
-    
-    while (1) {
-        // Get control data with timeout to prevent blocking
-        if (xSemaphoreTake(control_mutex, 100 / portTICK_PERIOD_MS)) {
-            // Apply motor control directly without copying data
-            set_motor_speed(0, current_control_data.left_motor_speed);   // Left motor
-            set_motor_speed(1, current_control_data.right_motor_speed);  // Right motor
-            xSemaphoreGive(control_mutex);
-        }
-        
-        vTaskDelay(delay_ticks);
     }
     vTaskDelete(NULL);
 }
@@ -339,195 +337,14 @@ void monitor_task (void *pvParameters)
         printf("ROLL: %3.1f, PID integral: %3.1f, Control Roll output: %3.1f \n", sensor_data.roll, roll_pid.integral, control_data.roll_output);
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
+    vTaskDelete(NULL);
 }
+/////////////////////////            MAIN APP SECTION       ////////////////////////
 
-// Control Functions
-void init_pid_controller(pid_controller_t *pid, float kp, float ki, float kd, float min, float max) {
-    pid->kp = kp;
-    pid->ki = ki;
-    pid->kd = kd;
-    pid->integral = 0.0f;
-    pid->previous_error = 0.0f;
-    pid->output = 0.0f;
-    pid->output_min = min;
-    pid->output_max = max;
-}
-
-float calculate_pid(pid_controller_t *pid, float setpoint, float input, float dt) {
-    float error = setpoint - input;
-    
-    // Proportional term
-    float p_term = pid->kp * error;
-    
-    // Integral term
-    pid->integral += error * dt;
-    float i_term = pid->ki * pid->integral;
-    
-    // Derivative term
-    float d_term = pid->kd * (error - pid->previous_error) / dt;
-    
-    // Calculate output
-    pid->output = p_term + i_term + d_term;
-    
-    // Constrain output
-    constrain_float(&pid->output, pid->output_min, pid->output_max);
-    
-    // Update previous error
-    pid->previous_error = error;
-    
-    return pid->output;
-}
-
-void balance_control(sensor_data_t *sensor_data, control_data_t *control_data) {
-    static float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
-    
-    // Emergency stop if angle is too large
-    if (fabs(sensor_data->pitch) > EMERGENCY_STOP_ANGLE) {
-        control_data->left_motor_speed = 0.0f;
-        control_data->right_motor_speed = 0.0f;
-        ESP_LOGW("CONTROL", "Emergency stop! Angle: %.2f°", sensor_data->pitch);
-        return;
-    }
-        
-    // Calculate speed PID output (if you have encoders)
-    float speed_output = calculate_pid(&speed_pid, 0.0f, 0.0f, dt); // Placeholder
-    
-    // Calculate angle PID output (pitch control)
-    float angle_output = calculate_pid(&angle_pid, 0.0f, sensor_data->pitch, dt);
-
-    
-    // Combine outputs
-    float left_speed = angle_output + speed_output;
-    float right_speed = angle_output + speed_output;
-    
-    // Debug output (commented out to reduce spam)
-    // ESP_LOGD("CONTROL", "Pitch: %.2f°, Angle PID: %.1f, Left: %.1f, Right: %.1f", 
-    //          sensor_data->pitch, angle_output, left_speed, right_speed);
-    
-    // Constrain motor speeds
-    constrain_float(&left_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-    constrain_float(&right_speed, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-    
-    control_data->angle_output = angle_output;
-    control_data->speed_output = speed_output;
-    control_data->left_motor_speed = left_speed;
-    control_data->right_motor_speed = right_speed;
-    control_data->timestamp = xTaskGetTickCount();
-}
-
-// Motor Control Functions
-void set_motor_speed(int motor, float speed) {
-    // Convert speed (-255 to 255) to PWM and direction
-    float abs_speed = fabs(speed);
-    bool forward = speed >= 0.0f;
-    
-    // Constrain speed
-    if (abs_speed > MAX_MOTOR_SPEED) abs_speed = MAX_MOTOR_SPEED;
-    if (abs_speed < MIN_MOTOR_SPEED && abs_speed > 0) abs_speed = MIN_MOTOR_SPEED;
-    
-    if (motor == 0) { // Left motor (Motor A)
-        // Set direction pins for left motor only
-        gpio_set_level((gpio_num_t)MOTOR_IN1_PIN, forward ? 1 : 0);
-        gpio_set_level((gpio_num_t)MOTOR_IN2_PIN, forward ? 0 : 1);
-        
-        // Set PWM duty cycle
-        float duty_percent = (abs_speed / 255.0f) * 100.0f;
-        mcpwm_set_duty(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, duty_percent);
-        mcpwm_set_duty_type(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
-        
-        // ESP_LOGI("MOTOR", "Left motor: speed=%.1f, abs=%.1f, duty=%.1f%%, forward=%d", 
-        //         speed, abs_speed, duty_percent, forward);
-    }
-    else if (motor == 1) { // Right motor (Motor B)
-        // Set direction pins for right motor only
-        gpio_set_level((gpio_num_t)MOTOR_IN3_PIN, forward ? 1 : 0);
-        gpio_set_level((gpio_num_t)MOTOR_IN4_PIN, forward ? 0 : 1);
-        
-        // Set PWM duty cycle
-        float duty_percent = (abs_speed / 255.0f) * 100.0f;
-        mcpwm_set_duty(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, duty_percent);
-        mcpwm_set_duty_type(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM_DUTY_MODE_0);
-        
-        // ESP_LOGI("MOTOR", "Right motor: speed=%.1f, abs=%.1f, duty=%.1f%%, forward=%d", 
-        //         speed, abs_speed, duty_percent, forward);
-    }
-}
-
-void emergency_stop(void) {
-    set_motor_speed(0, 0.0f);
-    set_motor_speed(1, 0.0f);
-    ESP_LOGW("MOTOR", "Emergency stop activated!");
-}
-
-// Test function to verify motor control
-void test_motors(void) {
-    ESP_LOGI("MOTOR", "Testing motors...");
-    
-    // Test with higher speeds to ensure motors move
-    ESP_LOGI("MOTOR", "Left motor forward 80%");
-    set_motor_speed(0, 200.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    ESP_LOGI("MOTOR", "Left motor reverse 80%");
-    set_motor_speed(0, -200.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    ESP_LOGI("MOTOR", "Right motor forward 80%");
-    set_motor_speed(1, 200.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    ESP_LOGI("MOTOR", "Right motor reverse 80%");
-    set_motor_speed(1, -200.0f);
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    // Stop both motors
-    ESP_LOGI("MOTOR", "Stopping motors");
-    set_motor_speed(0, 0.0f);
-    set_motor_speed(1, 0.0f);
-    
-    ESP_LOGI("MOTOR", "Motor test complete");
-}
-
-// Utility Functions
-float degrees_to_radians(float degrees) {
-    return degrees * M_PI / 180.0f;
-}
-
-float radians_to_degrees(float radians) {
-    return radians * 180.0f / M_PI;
-}
-
-void constrain_float(float *value, float min_val, float max_val) {
-    if (*value < min_val) *value = min_val;
-    if (*value > max_val) *value = max_val;
-}
-
-// Main Application
-void app_main(void) {
-    ESP_LOGI("MAIN", "Starting Self-Balancing Robot...");
-    
-    // Initialize all components
-    ESP_ERROR_CHECK(init_i2c());
-    ESP_ERROR_CHECK(init_mpu6050());
-    ESP_ERROR_CHECK(init_motors());
-    ESP_ERROR_CHECK(init_queues_and_semaphores());
-    
-    // Initialize PID controllers
-    init_pid_controller(&angle_pid, KP_ANGLE, KI_ANGLE, KD_ANGLE, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-    init_pid_controller(&speed_pid, KP_SPEED, KI_SPEED, KD_SPEED, -MAX_MOTOR_SPEED, MAX_MOTOR_SPEED);
-    
-    // Create tasks
-    xTaskCreate(sensor_task, "sensor_task", SENSOR_TASK_STACK_SIZE, NULL, SENSOR_TASK_PRIORITY, &sensor_task_handle);
-    xTaskCreate(control_task, "control_task", CONTROL_TASK_STACK_SIZE, NULL, CONTROL_TASK_PRIORITY, &control_task_handle);
-    xTaskCreate(motor_task, "motor_task", MOTOR_TASK_STACK_SIZE, NULL, MOTOR_TASK_PRIORITY, &motor_task_handle);
-    xTaskCreate(monitor_task, "monitor_task", MONITOR_TASK_STACK_SIZE, NULL, MONITOR_TASK_PRIORITY, &monitor_task_handle);
-    
-    ESP_LOGI("MAIN", "All tasks created successfully!");
-    
-    // Test motors before starting balancing
-    test_motors();
-    
-    ESP_LOGI("MAIN", "Self-balancing robot is running...");
-    ESP_LOGI("MAIN", "MPU Data Format: Yaw, Pitch, Roll (degrees) | Gyro X,Y,Z (deg/s) | Accel X,Y,Z (g)");
-    ESP_LOGI("MAIN", "Monitor will show detailed status every second");
+void app_main (void)
+{
+    xTaskCreate(monitor_task, "monitor_task", 2048, NULL, 10, NULL);
+    xTaskCreate(sensor_task, "sensor_task", 2048*2, NULL, 10, NULL);
+    xTaskCreate(control_task, "control_task", 2048, NULL, 10, NULL);
+    xTaskCreate(motor_task, "motor_task", 2048, NULL, 10, NULL);
 }
