@@ -1,4 +1,5 @@
 #include "MPU6050.h"
+#include "MPU6050_6Axis_MotionApps20.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -9,8 +10,10 @@
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
 
-/* Motor Pins assigment */
+#define PIN_SDA         21
+#define PIN_CLK         22
 
+/* Motor Pins assigment */
 #define MOTOR_ENA_PIN   14  
 #define MOTOR_ENB_PIN   32
 #define MOTOR_IN1_PIN   27
@@ -23,12 +26,16 @@
 #define MIN_MOTOR_SPEED 38.25f
 
 /* PID parameter */
-#define KP_PITCH 50.0f
-#define KP_YAW 50.0f
-#define KI_PITCH 0.0f
+#define KP_ROLL 15.0f
+#define KI_ROLL 5.0f
+#define KD_ROLL 1.0f
+#define KP_YAW 5.0f
 #define KI_YAW 0.0f
-#define KD_PITCH 0.0f
 #define KD_YAW 0.0f
+
+/* PID constraints */
+#define PID_INTEGRAL_CLAMP 50.0f
+#define PID_OUTPUT_CLAMP 255.0f
 
 /* Task freq */
 #define MOTOR_UPDATE_FREQ_HZ 100  /* 100Hz */ 
@@ -41,9 +48,9 @@ typedef struct
     float yaw;
     float pitch;
     float roll;
-    float gyro_x;
-    float gyro_y;
-    float gyro_z;
+    // float gyro_x;
+    // float gyro_y;
+    // float gyro_z;
     float accel_x;
     float accel_y;
     float accel_z;
@@ -63,11 +70,11 @@ typedef struct
 
 typedef struct 
 {
-    float pitch_output;
+    float roll_output;
     float yawRate_output;
     float left_motor_speed;
-    float left_motor_feedback;
     float right_motor_speed;
+    float left_motor_feedback;
     float right_motor_feedback;
     uint32_t timestamp;
 } control_data_t;
