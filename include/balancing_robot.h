@@ -5,20 +5,36 @@
  * @date Sept 2025
  */
 
+// #include "MPU6050.h"
+// #include "MPU6050_6Axis_MotionApps20.h"
+// #include "freertos/FreeRTOS.h"
+// #include "freertos/task.h"
+// #include "freertos/queue.h"
+// #include <freertos/semphr.h>
+// #include "esp_err.h"
+// #include "esp_log.h"
+// #include "esp_timer.h"
+// #include "driver/gpio.h"
+// #include "driver/mcpwm.h"
+// #include "soc/mcpwm_periph.h"
+// #include "sdkconfig.h"
+
+#include <driver/i2c.h>
+#include <esp_log.h>
+#include <esp_err.h>
+#include "esp_timer.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "MPU6050.h"
 #include "MPU6050_6Axis_MotionApps20.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include <freertos/semphr.h>
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "driver/gpio.h"
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
+#include "sdkconfig.h"
 
 #define PIN_SDA         21
 #define PIN_CLK         22
+#define I2C_MASTER_NUM              I2C_NUM_0                   /*!< I2C port number for master dev */
+#define I2C_MASTER_FREQ_HZ          400000                     /*!< I2C master clock frequency */
 
 /* Motor Pins assigment */
 #define MOTOR_ENA_PIN   14  
@@ -37,7 +53,7 @@
 
 /* PID parameter */
 #define KP_ROLL 20.0f /* best results so far: P = 25, I = 2, D = .8*/
-#define KI_ROLL 2.0f
+#define KI_ROLL 1.5f
 #define KD_ROLL 0.8f
 #define KP_SPEED 0.2f
 #define KI_SPEED 0.0f
@@ -67,17 +83,21 @@ typedef struct
     float accel_y;
     float accel_z;
     uint32_t timestamp;
+    float dt_since_last;
 } sensor_data_t;
 
 typedef struct 
 {
     float setpoint;
+    float error;
     float kp;
     float ki;
     float kd;
     float integral;
     float previous_error;
     float output;
+    float integral_clamp;
+    float output_clamp;
 } pid_controller_t;
 
 typedef struct 
