@@ -52,21 +52,21 @@
 #define PWM_FREQ_HZ     100             /* Hz */
 
 /* PID parameter */
-#define KP_ROLL 20.0f /* best results so far: P = 25, I = 2, D = .8*/
-#define KI_ROLL 1.5f
+#define KP_ROLL 25.0f /* best results so far: P = 25, I = 2, D = .8*/
+#define KI_ROLL 2.0f
 #define KD_ROLL 0.8f
-#define KP_SPEED 0.2f
-#define KI_SPEED 0.0f
-#define KD_SPEED 0.0f
+#define KP_SPEED 2.0f
+#define KI_SPEED 0.1f
+#define KD_SPEED 0.1f
 
 /* PID constraints */
-#define ROLL_PID_INTEGRAL_CLAMP 50.0f
+#define ROLL_PID_INTEGRAL_CLAMP 100.0f
 #define ROLL_PID_OUTPUT_CLAMP 255.0f
-#define SPEED_PID_INTEGRAL_CLAMP 50.0f
+#define SPEED_PID_INTEGRAL_CLAMP 100.0f
 #define SPEED_PID_OUTPUT_CLAMP 255.0f
 
 /* Task freq */
-#define MOTOR_UPDATE_FREQ_HZ 100  /* 100Hz */ 
+#define MOTOR_UPDATE_FREQ_HZ 100  /* 500Hz */ 
 #define SENSOR_READ_FREQ_HZ 100
 #define CONTROL_LOOP_FREQ_HZ 100
 
@@ -114,7 +114,7 @@ typedef struct
 void initI2C(void);
 void mpu_setup(MPU6050 &mpu);
 void sensor_task (void *pvParameters);
-float compute_pid(pid_controller_t *pid, float setpoint, float feedback, float dt);
+float compute_pid(pid_controller_t *pid, float *feedback, float dt);
 void balance_task(void *pvParameters);
 esp_err_t motor_init(void);
 void set_motor_speed(int motor, float *speed);

@@ -33,7 +33,7 @@ pid_controller_t speed_pid =
 
 pid_controller_t roll_pid = 
 {
-    .setpoint = 0.5f,
+    .setpoint = 0.0f,
     .error = 0.0f,
     .kp = KP_ROLL,
     .ki = KI_ROLL,
@@ -90,7 +90,7 @@ void initI2C(void)
 	conf.scl_io_num = (gpio_num_t)PIN_CLK;
 	conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
 	conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-	conf.master.clk_speed = 400000;
+	conf.master.clk_speed = 100000;
     conf.clk_flags = 0;
 	ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
 	ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
@@ -145,6 +145,7 @@ void mpu_setup(MPU6050 &mpu)
         ESP_LOGI(TAG_MPU, "%d", devStatus);
         ESP_LOGI(TAG_MPU, ")");
     } 
+    mpu.setRate(10);
     ESP_LOGI(TAG_MPU, "MPU 6050 setup complete.");
 }   
 
@@ -158,6 +159,7 @@ void sensor_task (void *pvParameters)
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / SENSOR_READ_FREQ_HZ);
     sensor_data_t new_data;
     MPU6050 mpu = MPU6050();
+
     mpu_setup(mpu);
     while (1)
     {
@@ -167,8 +169,8 @@ void sensor_task (void *pvParameters)
         mpu.resetFIFO();
         
         // get current FIFO count
-        uint16_t fifoCount = mpu.getFIFOCount();
-        
+        uint16_t fifoCount = mpu.getFIFOCount();        
+
         // wait for correct available data length, should be a VERY short wait
         while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
 
@@ -268,6 +270,8 @@ void balance_task (void *pvParameters)
         /* control logic here */
         if (current_data.roll > MAX_ANGLE || current_data.roll < MIN_ANGLE)
         {
+            roll_pid.integral = 0.0f;
+            speed_pid.integral = 0.0f;
             control_data.speed_output = 0.0f;
             control_data.roll_output = 0.0f;
         }
@@ -387,7 +391,7 @@ void motor_task (void *pvParameters)
 void monitor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(200); // 1 second
+    const TickType_t xFrequency = pdMS_TO_TICKS(500); // 1 second
 
     sensor_data_t monitor_sensor_data;
     pid_controller_t monitor_speed_pid;
@@ -417,7 +421,10 @@ void monitor_task (void *pvParameters)
                 monitor_roll_pid.setpoint,
                 monitor_sensor_data.roll, 
                 monitor_roll_pid.error,  // Error from desired setppint
-                control_data.roll_output);
+                monitor_control_data.left_motor_speed);
+        
+        // printf("Tilt: %3.1f°\n",
+        //         monitor_sensor_data.roll);
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
     vTaskDelete(NULL);
@@ -435,6 +442,6 @@ void app_main (void)
     motor_init();
     xTaskCreate(sensor_task, "sensor_task", 2048*2, NULL, 5, NULL); /* High priority for sensor readings */
     xTaskCreate(balance_task, "balance_task", 2048, NULL, 4, NULL); /* Critical control calculations */
-    xTaskCreate(motor_task, "motor_task", 2048, NULL, 3, NULL);     /* Motor control updates  */
-    xTaskCreate(monitor_task, "monitor_task", 2048, NULL, 1, NULL); /* Lowest priority for monitoring */
+    xTaskCreate(motor_task, "motor_task", 1024, NULL, 3, NULL);     /* Motor control updates  */
+    xTaskCreate(monitor_task, "monitor_task", 2048*2, NULL, 1, NULL); /* Lowest priority for monitoring */
 }
