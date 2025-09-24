@@ -25,58 +25,66 @@
 #include "esp_timer.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 #include "MPU6050.h"
 #include "MPU6050_6Axis_MotionApps20.h"
+#include "driver/gpio.h"
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
 #include "sdkconfig.h"
 
-#define PIN_SDA         21
-#define PIN_CLK         22
-#define I2C_MASTER_NUM              I2C_NUM_0                   /*!< I2C port number for master dev */
-#define I2C_MASTER_FREQ_HZ          100000                     /*!< I2C master clock frequency */
+/* I2C parameters */
+#define PIN_SDA                 21
+#define PIN_CLK                 22
+#define I2C_MASTER_NUM          I2C_NUM_0                   /*!< I2C port number for master dev */
+#define I2C_MASTER_FREQ_HZ      100000                     /*!< I2C master clock frequency */
 
-/* Motor Pins assigment */
-#define MOTOR_ENA_PIN   14  
-#define MOTOR_ENB_PIN   32
-#define MOTOR_IN1_PIN   27
-#define MOTOR_IN2_PIN   26
-#define MOTOR_IN3_PIN   25
-#define MOTOR_IN4_PIN   33
+/* Motor pins assigment */
+#define MOTOR_ENA_PIN           14  
+#define MOTOR_ENB_PIN           32
+#define MOTOR_IN1_PIN           27
+#define MOTOR_IN2_PIN           26
+#define MOTOR_IN3_PIN           25
+#define MOTOR_IN4_PIN           33
+#define GPIO_MOTOR_PIN_SEL      (   (1ULL << MOTOR_IN1_PIN) | (1ULL << MOTOR_IN2_PIN) | \
+                                    (1ULL << MOTOR_IN3_PIN) | (1ULL << MOTOR_IN4_PIN) )
 
 /* Encoder pin assignment */
-#define LEFT_ENCODER_A_PIN  16
-#define LEFT_ENCODER_B_PIN  17
-#define RIGHT_ENCODER_A_PIN 18
-#define RIGHT_ENCODER_B_PIN 19
-#define ENCODER_PPR         22                        /* Pulses per revolution, 11 each channel */
-#define WHEEL_PPR           (ENCODER_PPR * 21.3f)f    /* Gear ratio 21.3:1 */   
+#define LEFT_ENCODER_A_PIN      16
+#define LEFT_ENCODER_B_PIN      17
+#define RIGHT_ENCODER_A_PIN     18
+#define RIGHT_ENCODER_B_PIN     19
+#define GPIO_ENCODER_PIN_SEL    (   (1ULL << LEFT_ENCODER_A_PIN) | (1ULL << LEFT_ENCODER_B_PIN) | \
+                                    (1ULL << RIGHT_ENCODER_A_PIN) | (1ULL << RIGHT_ENCODER_A_PIN) )
+#define ENCODER_PPR             22                        /* Pulses per revolution, 11 each channel */
+#define WHEEL_PPR               (ENCODER_PPR * 21.3f)f    /* Gear ratio 21.3:1 */   
+#define ESP_INTR_FLAG_DEFAULT   0
 
 /* Motor constrains */
-#define MAX_MOTOR_SPEED 255.0f
-#define MIN_MOTOR_SPEED 10.0f           //38.25
-#define MAX_ANGLE       15.0f           /* degrees */
-#define MIN_ANGLE       -MAX_ANGLE      /* degrees */
-#define PWM_FREQ_HZ     100             /* Hz */
+#define MAX_MOTOR_SPEED         255.0f
+#define MIN_MOTOR_SPEED         10.0f           //38.25
+#define MAX_ANGLE               15.0f           /* degrees */
+#define MIN_ANGLE               -MAX_ANGLE      /* degrees */
+#define PWM_FREQ_HZ             100             /* Hz */
 
 /* PID parameter */
-#define KP_ROLL 25.0f /* best results so far: P = 25, I = 2, D = .8*/
-#define KI_ROLL 2.0f
-#define KD_ROLL 0.8f
-#define KP_SPEED 2.0f
-#define KI_SPEED 0.1f
-#define KD_SPEED 0.1f
+#define KP_ROLL                 25.0f /* best results so far: P = 25, I = 2, D = .8*/
+#define KI_ROLL                 4.0f
+#define KD_ROLL                 0.8f
+#define KP_SPEED                0.01f
+#define KI_SPEED                0.01f
+#define KD_SPEED                0.01f
 
 /* PID constraints */
-#define ROLL_PID_INTEGRAL_CLAMP 100.0f
-#define ROLL_PID_OUTPUT_CLAMP 255.0f
-#define SPEED_PID_INTEGRAL_CLAMP 100.0f
-#define SPEED_PID_OUTPUT_CLAMP 255.0f
+#define ROLL_PID_INTEGRAL_CLAMP     100.0f
+#define ROLL_PID_OUTPUT_CLAMP       255.0f
+#define SPEED_PID_INTEGRAL_CLAMP    100.0f
+#define SPEED_PID_OUTPUT_CLAMP      255.0f
 
 /* Task freq */
-#define MOTOR_UPDATE_FREQ_HZ 100  /* 500Hz */ 
-#define SENSOR_READ_FREQ_HZ 100
-#define CONTROL_LOOP_FREQ_HZ 100
+#define MOTOR_UPDATE_FREQ_HZ        100  /* 500Hz */ 
+#define SENSOR_READ_FREQ_HZ         100
+#define CONTROL_LOOP_FREQ_HZ        100
 
 // Data Structures
 typedef struct 
@@ -114,6 +122,8 @@ typedef struct
     float speed_output;
     float left_motor_speed;
     float right_motor_speed;
+    uint32_t left_motor_pulsecount;
+    uint32_t right_motor_pulsecount;
     float left_motor_feedback;
     float right_motor_feedback;
     uint32_t timestamp;
