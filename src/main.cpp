@@ -6,7 +6,6 @@
  */
 
 #include "balancing_robot.h"
-#include <driver/i2c.h>
 
 static const char *TAG_MPU = "MPU";
 static const char *TAG_MUTEX = "MUTEX";
@@ -90,7 +89,7 @@ void initI2C(void)
 	conf.scl_io_num = (gpio_num_t)PIN_CLK;
 	conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
 	conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-	conf.master.clk_speed = 100000;
+	conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
     conf.clk_flags = 0;
 	ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
 	ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0));
@@ -101,7 +100,6 @@ void initI2C(void)
  */
 void mpu_setup(MPU6050 &mpu)
 {
-    initI2C();
     mpu.initialize();
     // pinMode(INTERRUPT_PIN, INPUT);
 
@@ -159,7 +157,7 @@ void sensor_task (void *pvParameters)
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / SENSOR_READ_FREQ_HZ);
     sensor_data_t new_data;
     MPU6050 mpu = MPU6050();
-
+    initI2C();
     mpu_setup(mpu);
     while (1)
     {
@@ -249,7 +247,7 @@ void balance_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
-    sensor_data_t current_data = {0};
+    sensor_data_t current_data = {};
     float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
     while (1)
     {  
@@ -378,6 +376,7 @@ void motor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / MOTOR_UPDATE_FREQ_HZ);
+    motor_init();
     while (1)
     {
         set_motor_speed(0, &control_data.right_motor_speed);
@@ -391,7 +390,7 @@ void motor_task (void *pvParameters)
 void monitor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(500); // 1 second
+    const TickType_t xFrequency = pdMS_TO_TICKS(500); // x ms second
 
     sensor_data_t monitor_sensor_data;
     pid_controller_t monitor_speed_pid;
@@ -439,7 +438,6 @@ void app_main (void)
         ESP_LOGE(TAG_MUTEX, "Failed to create mutex\n");
         return;
     }
-    motor_init();
     xTaskCreate(sensor_task, "sensor_task", 2048*2, NULL, 5, NULL); /* High priority for sensor readings */
     xTaskCreate(balance_task, "balance_task", 2048, NULL, 4, NULL); /* Critical control calculations */
     xTaskCreate(motor_task, "motor_task", 1024, NULL, 3, NULL);     /* Motor control updates  */

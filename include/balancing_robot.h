@@ -34,7 +34,7 @@
 #define PIN_SDA         21
 #define PIN_CLK         22
 #define I2C_MASTER_NUM              I2C_NUM_0                   /*!< I2C port number for master dev */
-#define I2C_MASTER_FREQ_HZ          400000                     /*!< I2C master clock frequency */
+#define I2C_MASTER_FREQ_HZ          100000                     /*!< I2C master clock frequency */
 
 /* Motor Pins assigment */
 #define MOTOR_ENA_PIN   14  
@@ -43,6 +43,14 @@
 #define MOTOR_IN2_PIN   26
 #define MOTOR_IN3_PIN   25
 #define MOTOR_IN4_PIN   33
+
+/* Encoder pin assignment */
+#define LEFT_ENCODER_A_PIN  16
+#define LEFT_ENCODER_B_PIN  17
+#define RIGHT_ENCODER_A_PIN 18
+#define RIGHT_ENCODER_B_PIN 19
+#define ENCODER_PPR         22                        /* Pulses per revolution, 11 each channel */
+#define WHEEL_PPR           (ENCODER_PPR * 21.3f)f    /* Gear ratio 21.3:1 */   
 
 /* Motor constrains */
 #define MAX_MOTOR_SPEED 255.0f
