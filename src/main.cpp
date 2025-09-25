@@ -5,6 +5,8 @@
  * @date Sept 2025
  */
 
+#include "MPU6050.h"
+#include "MPU6050_6Axis_MotionApps20.h"
 #include "balancing_robot.h"
 
 static const char *TAG_MPU = "MPU";
@@ -32,7 +34,7 @@ pid_controller_t speed_pid =
 
 pid_controller_t roll_pid = 
 {
-    .setpoint = 0.22f,
+    .setpoint = 0.0f,
     .error = 0.0f,
     .kp = KP_ROLL,
     .ki = KI_ROLL,
@@ -72,9 +74,10 @@ sensor_data_t sensor_data =
 
 encoder_data_t encoder_data = {};
 
-SemaphoreHandle_t mutex_sensor_data;    /* */
+SemaphoreHandle_t mutex_sensor_data;
 SemaphoreHandle_t mutex_control_data;
 SemaphoreHandle_t mutex_encoder_data;
+SemaphoreHandle_t mutex_web_data;
 
 static QueueHandle_t interrupt_queue = NULL; 
 
@@ -263,6 +266,19 @@ void balance_task (void *pvParameters)
     float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
     while (1)
     {  
+        // Get web control parameters safely
+        web_control_t web_ctrl;
+        if (xSemaphoreTake(mutex_web_data, pdMS_TO_TICKS(10)) == pdTRUE) {
+            web_ctrl = web_control;
+            xSemaphoreGive(mutex_web_data);
+        }
+        
+        // Update PID parameters from web interface
+        roll_pid.kp = web_ctrl.kp_roll;
+        roll_pid.ki = web_ctrl.ki_roll;
+        roll_pid.kd = web_ctrl.kd_roll;
+        roll_pid.setpoint = web_ctrl.target_angle;
+
         if (xSemaphoreTake(mutex_sensor_data, pdMS_TO_TICKS(10)) == pdTRUE)
         {
             if (current_data.timestamp > 0)
@@ -297,6 +313,7 @@ void balance_task (void *pvParameters)
             ESP_LOGW(TAG_MUTEX, "Failed to take encoder data mutex");
         }
 
+
         /* control logic here */
         if (current_data.roll > MAX_ANGLE || current_data.roll < MIN_ANGLE)
         {
@@ -307,14 +324,12 @@ void balance_task (void *pvParameters)
         }
         else
         {
-            // local_control_data.speed_output = compute_pid(&speed_pid, &speed_feedback, dt);
+            // local_control_data.speed_output = compute_pid(&speed_pid, &speed_feedback, dt); /* WIP */
             local_control_data.roll_output = compute_pid(&roll_pid, &current_data.roll, dt);
         }
-        // control_data.yawRate_output = compute_pid(&yawRate_pid, 0.0f, current_data.yaw, dt);
-        local_control_data.left_motor_speed = local_control_data.roll_output 
-                                                + compute_pid(&speed_pid, &local_control_data.left_motor_feedback, dt);
-        local_control_data.right_motor_speed = local_control_data.roll_output 
-                                                + compute_pid(&speed_pid, &local_control_data.right_motor_feedback, dt);
+        local_control_data.left_motor_speed = local_control_data.roll_output + local_control_data.speed_output;
+        local_control_data.right_motor_speed = local_control_data.roll_output + local_control_data.speed_output;
+
         if (xSemaphoreTake(mutex_control_data, pdMS_TO_TICKS(10)) == pdTRUE)
         {
             control_data = local_control_data;
@@ -451,14 +466,49 @@ void motor_task (void *pvParameters)
 
 /**
  * @brief Interrupt handles 
- * @note none
+ * @note will update with direction reading later
  */
 static void IRAM_ATTR left_encoder_interrupt_handler(void *args)
 {
+    uint32_t pinNumber = (uint32_t) args;
+    switch (pinNumber)
+    {
+    case LEFT_ENCODER_A_PIN:
+        if (gpio_get_level((gpio_num_t)LEFT_ENCODER_B_PIN))
+        {   /* B is High when A triggered -> backwards? */
+            /* rotating backward? */
+        }
+        break;
+    case LEFT_ENCODER_B_PIN:
+        if (gpio_get_level((gpio_num_t)LEFT_ENCODER_A_PIN))
+        {   /* A is High when B trigger -> forwards? */
+            /* rotating forward? */
+        }
+        
+    default:
+        break;
+    }
     encoder_data.left_encoder_pulseCount++;  
 }
 static void IRAM_ATTR right_encoder_interrupt_handler(void *args)
 {
+    uint32_t pinNumber = (uint32_t) args;
+    switch (pinNumber)
+    {
+    case RIGHT_ENCODER_A_PIN:
+        if (gpio_get_level((gpio_num_t)RIGHT_ENCODER_B_PIN))
+        {   /* B is High when A triggered -> backwards? */
+            /* rotating backward? */
+        }
+        break;
+    case RIGHT_ENCODER_B_PIN:
+        if (gpio_get_level((gpio_num_t)RIGHT_ENCODER_A_PIN))
+        {   /* A is High when B trigger -> forwards? */
+            /* rotating forward? */
+        }        
+    default:
+        break;
+    } 
     encoder_data.right_encoder_pulseCount++;
 }
 
@@ -496,14 +546,16 @@ void encoder_task(void *pvParameters)
         .intr_type = GPIO_INTR_POSEDGE,
     };
     gpio_config(&motor_io_conf);
-    if(xSemaphoreTake(mutex_encoder_data, pdMS_TO_TICKS(100)) == pdTRUE)
+    while (1)
     {
-        encoder_data.left_motor_speed = compute_motor_speed(encoder_data.left_encoder_pulseCount, dt);
-        encoder_data.right_motor_speed = compute_motor_speed(encoder_data.right_encoder_pulseCount, dt);
-        xSemaphoreGive(mutex_encoder_data);
+        if(xSemaphoreTake(mutex_encoder_data, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+            encoder_data.left_motor_speed = compute_motor_speed(encoder_data.left_encoder_pulseCount, dt);
+            encoder_data.right_motor_speed = compute_motor_speed(encoder_data.right_encoder_pulseCount, dt);
+            xSemaphoreGive(mutex_encoder_data);
+        }   
+        xTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
-
-
 }
 
 
@@ -563,23 +615,15 @@ void monitor_task (void *pvParameters)
 
 void app_main (void)
 {
-    /* create  */
+    /* create mutex keys */
     mutex_sensor_data = xSemaphoreCreateMutex();
-    if (mutex_sensor_data == NULL) 
-    {
-        ESP_LOGE(TAG_MUTEX, "Failed to create sensor data mutex\n");
-        return;
-    }
     mutex_control_data = xSemaphoreCreateMutex();
-    if (mutex_control_data == NULL) 
-    {
-        ESP_LOGE(TAG_MUTEX, "Failed to create control data mutex\n");
-        return;
-    }
     mutex_encoder_data = xSemaphoreCreateMutex();
-    if (mutex_control_data == NULL) 
+    mutex_web_data = xSemaphoreCreateMutex();
+    if (mutex_control_data == NULL || mutex_encoder_data == NULL || 
+        mutex_sensor_data == NULL || mutex_web_data == NULL) 
     {
-        ESP_LOGE(TAG_MUTEX, "Failed to create control data mutex\n");
+        ESP_LOGE("MAIN", "Failed to create mutex\n");
         return;
     }
 
@@ -587,15 +631,18 @@ void app_main (void)
     interrupt_queue = xQueueCreate(10, sizeof(uint32_t));
     /* install gpio isr service */
     gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
-    /* hook isr handler for specific encoder pin */
+    /* hook isr handler to specific encoder pin */
     gpio_isr_handler_add((gpio_num_t)LEFT_ENCODER_A_PIN, left_encoder_interrupt_handler, (void*) LEFT_ENCODER_A_PIN);
     gpio_isr_handler_add((gpio_num_t)LEFT_ENCODER_B_PIN, left_encoder_interrupt_handler, (void*) LEFT_ENCODER_B_PIN);
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_A_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_A_PIN);
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_B_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_B_PIN);
 
-    xTaskCreate(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL);     /* High priority for sensor readings */
-    xTaskCreate(balance_task, "balance_task", 1024*3, NULL, 4, NULL);   /* Critical control calculations */
-    xTaskCreate(encoder_task, "encoder_task", 1024*2, NULL, 3, NULL);   /* Encoder reading */
-    xTaskCreate(motor_task, "motor_task", 1024*2, NULL, 3, NULL);       /* Motor control updates  */
-    xTaskCreate(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL);   /* Lowest priority for monitoring */
+    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL, 0);     /* Core 1: High priority for sensor readings */
+    xTaskCreatePinnedToCore(balance_task, "balance_task", 1024*3, NULL, 4, NULL, 0);   /* Core 1: Critical control calculations */
+    xTaskCreatePinnedToCore(encoder_task, "encoder_task", 1024*2, NULL, 3, NULL, 0);   /* Core 1: Encoder reading */
+    xTaskCreatePinnedToCore(motor_task, "motor_task", 1024*2, NULL, 3, NULL, 0);       /* Core 1: Motor control updates  */
+    xTaskCreatePinnedToCore(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL, 1);   /* Core 0: Lowest priority for monitoring */
+    xTaskCreatePinnedToCore(web_server_task, "web_server_task", WEB_SERVER_STACK_SIZE, NULL, 2, NULL, 1);
+
+    ESP_LOGE("MAIN", "ALL tasks initilized succesfully");
 }

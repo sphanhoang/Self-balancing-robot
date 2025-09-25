@@ -18,6 +18,8 @@
 // #include "driver/mcpwm.h"
 // #include "soc/mcpwm_periph.h"
 // #include "sdkconfig.h"
+#ifndef _BALANCING_ROBOT_H_
+#define _BALANCING_ROBOT_H_
 
 #include <driver/i2c.h>
 #include <esp_log.h>
@@ -26,12 +28,14 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include "MPU6050.h"
-#include "MPU6050_6Axis_MotionApps20.h"
 #include "driver/gpio.h"
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
 #include "sdkconfig.h"
+#include "esp_http_server.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
 
 /* I2C parameters */
 #define PIN_SDA                 21
@@ -87,6 +91,22 @@
 #define CONTROL_LOOP_FREQ_HZ        100
 #define ENCODER_READ_FREQ_HZ        10
 
+/* web server parameters */
+#define WEB_SERVER_STACK_SIZE 8192
+#define WEB_SERVER_PORT 80
+
+/* Web control structure */
+typedef struct {
+    float kp_roll;
+    float ki_roll; 
+    float kd_roll;
+    float kp_speed;
+    float ki_speed;
+    float kd_speed;
+    bool enable_balance;
+    float target_angle;
+} web_control_t;
+
 // Data Structures
 typedef struct 
 {
@@ -136,6 +156,18 @@ typedef struct
     float right_motor_speed;
 }encoder_data_t;
 
+extern pid_controller_t speed_pid;
+extern pid_controller_t roll_pid;
+extern control_data_t control_data;
+extern sensor_data_t sensor_data;
+extern encoder_data_t encoder_data;
+extern SemaphoreHandle_t mutex_sensor_data;   
+extern SemaphoreHandle_t mutex_control_data;
+extern SemaphoreHandle_t mutex_encoder_data;
+extern SemaphoreHandle_t mutex_web_data;
+extern web_control_t web_control;
+
+typedef struct MPU6050 MPU6050; 
 
 void initI2C(void);
 void mpu_setup(MPU6050 &mpu);
@@ -145,5 +177,10 @@ void balance_task(void *pvParameters);
 esp_err_t motor_init(void);
 void set_motor_speed(int motor, float *speed);
 void motor_task (void *pvParameters);
-void monitor_task(void *pvParameters);
 float compute_motor_speed(uint32_t &count, float &dt);
+void encoder_task(void *pvParameters);
+void monitor_task(void *pvParameters);
+void web_server_task(void *pvParameters);
+
+
+#endif /* BALANCING_ROBOT_H */
