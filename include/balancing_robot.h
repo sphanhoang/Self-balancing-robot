@@ -82,9 +82,10 @@
 #define SPEED_PID_OUTPUT_CLAMP      255.0f
 
 /* Task freq */
-#define MOTOR_UPDATE_FREQ_HZ        100  /* 500Hz */ 
+#define MOTOR_UPDATE_FREQ_HZ        100  /* 100Hz */ 
 #define SENSOR_READ_FREQ_HZ         100
 #define CONTROL_LOOP_FREQ_HZ        100
+#define ENCODER_READ_FREQ_HZ        10
 
 // Data Structures
 typedef struct 
@@ -122,12 +123,19 @@ typedef struct
     float speed_output;
     float left_motor_speed;
     float right_motor_speed;
-    uint32_t left_motor_pulsecount;
-    uint32_t right_motor_pulsecount;
     float left_motor_feedback;
     float right_motor_feedback;
     uint32_t timestamp;
 } control_data_t;
+
+typedef struct 
+{
+    uint32_t left_encoder_pulseCount;
+    uint32_t right_encoder_pulseCount;
+    float left_motor_speed;
+    float right_motor_speed;
+}encoder_data_t;
+
 
 void initI2C(void);
 void mpu_setup(MPU6050 &mpu);
@@ -138,3 +146,4 @@ esp_err_t motor_init(void);
 void set_motor_speed(int motor, float *speed);
 void motor_task (void *pvParameters);
 void monitor_task(void *pvParameters);
+float compute_motor_speed(uint32_t &count, float &dt);

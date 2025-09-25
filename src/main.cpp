@@ -50,8 +50,6 @@ control_data_t control_data =
     .speed_output = 0.0f,
     .left_motor_speed = 0.0f,
     .right_motor_speed = 0.0f,
-    .left_motor_pulsecount = 0,
-    .right_motor_pulsecount = 0,
     .left_motor_feedback = 0.0f,
     .right_motor_feedback = 0.0f,
     .timestamp = 0
@@ -72,8 +70,12 @@ sensor_data_t sensor_data =
     .dt_since_last = 0.0f
 };
 
+encoder_data_t encoder_data = {};
+
 SemaphoreHandle_t mutex_sensor_data;    /* */
 SemaphoreHandle_t mutex_control_data;
+SemaphoreHandle_t mutex_encoder_data;
+
 static QueueHandle_t interrupt_queue = NULL; 
 
 uint16_t packetSize;
@@ -84,7 +86,10 @@ float ypr[3];           /* [yaw, pitch, roll]   yaw/pitch/roll container and gra
 VectorInt16 aa, aaReal;        /* [x, y, z]            accel sensor measurements */
 // uint8_t e_stop;
 
-////////////////////////            SENSOR SECTION          ////////////////////////
+
+////////////////////////////////////////////////            SENSOR SECTION          ////////////////////////////////////////////////
+
+
 void initI2C(void) 
 {
 	i2c_config_t conf;
@@ -204,18 +209,9 @@ void sensor_task (void *pvParameters)
     vTaskDelete(NULL);
 }
 
-////////////////////////            CONTROL SECTION         ////////////////////////
 
-/**
- * @brief Motor speed calculation
- */
-float compute_motor_speed(uint32_t &count, float &dt)
-{
-    float ret = ((count / (float)ENCODER_PPR) / dt) / 100.0f; /* Revolution per sec
-                                                            assume dt is 10ms everytime */
-    count = 0;
-    return ret;                                 
-}
+////////////////////////////////////////////////            CONTROL SECTION         ////////////////////////////////////////////////
+
 
 /**
  * @brief PID controller computation
@@ -281,27 +277,27 @@ void balance_task (void *pvParameters)
         {
             ESP_LOGW(TAG_MUTEX, "Failed to take sensor data mutex");
         }
-        /*  */
-
-        /* control logic here */
         if (xSemaphoreTake(mutex_control_data, pdMS_TO_TICKS(10)) == pdTRUE)
         {
             local_control_data = control_data;
-            control_data.left_motor_pulsecount = 0;
-            control_data.right_motor_pulsecount = 0;
             xSemaphoreGive(mutex_control_data);
         }
         else
         {
             ESP_LOGW(TAG_MUTEX, "Failed to take control data mutex");
         }
+        if (xSemaphoreTake(mutex_encoder_data, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            local_control_data.left_motor_feedback = encoder_data.left_motor_speed;
+            local_control_data.right_motor_feedback = encoder_data.right_motor_speed;
+            xSemaphoreGive(mutex_encoder_data);
+        }
+        else
+        {
+            ESP_LOGW(TAG_MUTEX, "Failed to take encoder data mutex");
+        }
 
-        /* calculate motor speed */
-        local_control_data.left_motor_feedback = compute_motor_speed(local_control_data.left_motor_pulsecount, dt);
-        local_control_data.right_motor_feedback = compute_motor_speed(local_control_data.right_motor_pulsecount, dt);
-        float speed_feedback = ((float)local_control_data.left_motor_feedback + 
-                                (float)local_control_data.right_motor_feedback)
-                                /2;
+        /* control logic here */
         if (current_data.roll > MAX_ANGLE || current_data.roll < MIN_ANGLE)
         {
             roll_pid.integral = 0.0f;
@@ -311,12 +307,14 @@ void balance_task (void *pvParameters)
         }
         else
         {
-            local_control_data.speed_output = compute_pid(&speed_pid, &speed_feedback, dt);
+            // local_control_data.speed_output = compute_pid(&speed_pid, &speed_feedback, dt);
             local_control_data.roll_output = compute_pid(&roll_pid, &current_data.roll, dt);
         }
         // control_data.yawRate_output = compute_pid(&yawRate_pid, 0.0f, current_data.yaw, dt);
-        local_control_data.left_motor_speed = local_control_data.roll_output + local_control_data.speed_output;
-        local_control_data.right_motor_speed = local_control_data.roll_output + local_control_data.speed_output;
+        local_control_data.left_motor_speed = local_control_data.roll_output 
+                                                + compute_pid(&speed_pid, &local_control_data.left_motor_feedback, dt);
+        local_control_data.right_motor_speed = local_control_data.roll_output 
+                                                + compute_pid(&speed_pid, &local_control_data.right_motor_feedback, dt);
         if (xSemaphoreTake(mutex_control_data, pdMS_TO_TICKS(10)) == pdTRUE)
         {
             control_data = local_control_data;
@@ -331,43 +329,9 @@ void balance_task (void *pvParameters)
     vTaskDelete(NULL);
 }
 
-////////////////////////            MOTOR SECTION           ////////////////////////
 
-/**
- * @brief Interrupt handles 
- * @note none
- */
-static void IRAM_ATTR left_encoder_interrupt_handler(void *args)
-{
-    // if (xSemaphoreTakeFromISR(mutex_control_data, NULL))
-    // {
-        control_data.left_motor_pulsecount++;
-        // printf("Pulse count: LEFT %ld", control_data.left_motor_pulsecount);
-    //     xQueueSendFromISR(interrupt_queue, &control_data.left_motor_pulsecount, NULL);
-    //     xSemaphoreGiveFromISR(mutex_control_data, NULL);
-    // }
-    // else
-    // {
-    //     ESP_LOGW(TAG_MUTEX, "Failed to take control data mutex");
-    // }
-    
-}
-static void IRAM_ATTR right_encoder_interrupt_handler(void *args)
-{
-    // if (xSemaphoreTakeFromISR(mutex_control_data, NULL))
-    // {
-        control_data.right_motor_pulsecount++;
-        // printf("        RIGHT %ld\n", control_data.left_motor_pulsecount);
-    //     xQueueSendFromISR(interrupt_queue, &control_data.right_motor_pulsecount, NULL);
-    //     xSemaphoreGiveFromISR(mutex_control_data, NULL);
-    // }
-    // else
-    // {
-    //     ESP_LOGW(TAG_MUTEX, "Failed to take control data mutex");
-    // }
-}
+////////////////////////////////////////////////            MOTOR SECTION           ////////////////////////////////////////////////
 
-// void pulse_count (void)
 
 /**
  * @brief Initialize pins and PWM channels to drive the motor
@@ -389,23 +353,6 @@ esp_err_t motor_init(void)
         .intr_type = GPIO_INTR_DISABLE
     };
     esp_err_t ret = gpio_config(&motor_io_conf);
-    if (ret != ESP_OK) { return ret; }
-
-    /* Encoder pins set to interrupt mode */
-    motor_io_conf =
-    {
-        /* bit mask of the pins, use GPIO16:19 */
-        .pin_bit_mask = GPIO_ENCODER_PIN_SEL,
-        /* set as input mode */
-        .mode = GPIO_MODE_INPUT,
-        /* enable pull-up mode */
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        /* disable pull-down resistor */
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        /* interrupt of rising edge */
-        .intr_type = GPIO_INTR_POSEDGE,
-    };
-    ret = gpio_config(&motor_io_conf);
     if (ret != ESP_OK) { return ret; }
         
     /* Setup PWM channel ENA and ENB */
@@ -497,7 +444,73 @@ void motor_task (void *pvParameters)
     }
     vTaskDelete(NULL);
 }
+
+
+/////////////////////////////////////////////////               Encoder Section        ////////////////////////////////////////////////
+
+
+/**
+ * @brief Interrupt handles 
+ * @note none
+ */
+static void IRAM_ATTR left_encoder_interrupt_handler(void *args)
+{
+    encoder_data.left_encoder_pulseCount++;  
+}
+static void IRAM_ATTR right_encoder_interrupt_handler(void *args)
+{
+    encoder_data.right_encoder_pulseCount++;
+}
+
+/**
+ * @brief Motor speed calculation
+ */
+float compute_motor_speed(uint32_t &count, float &dt)
+{
+    float ret = ((count / (float)ENCODER_PPR) / dt) / 100.0f; /* Revolution per sec
+                                                            assume dt is 10ms everytime */
+    count = 0;
+    return ret;                                 
+}
+
+/**
+ * @brief init encoder
+ */
+void encoder_task(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(10); // x ms second
+    float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
+    /* Encoder pins set to interrupt mode */
+    gpio_config_t motor_io_conf =
+    {
+        /* bit mask of the pins, use GPIO16:19 */
+        .pin_bit_mask = GPIO_ENCODER_PIN_SEL,
+        /* set as input mode */
+        .mode = GPIO_MODE_INPUT,
+        /* enable pull-up mode */
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        /* disable pull-down resistor */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        /* interrupt of rising edge */
+        .intr_type = GPIO_INTR_POSEDGE,
+    };
+    gpio_config(&motor_io_conf);
+    if(xSemaphoreTake(mutex_encoder_data, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        encoder_data.left_motor_speed = compute_motor_speed(encoder_data.left_encoder_pulseCount, dt);
+        encoder_data.right_motor_speed = compute_motor_speed(encoder_data.right_encoder_pulseCount, dt);
+        xSemaphoreGive(mutex_encoder_data);
+    }
+
+
+}
+
+
+
 /////////////////////////            Monitor Task           ////////////////////////
+
+
 
 void monitor_task (void *pvParameters)
 {
@@ -563,7 +576,12 @@ void app_main (void)
         ESP_LOGE(TAG_MUTEX, "Failed to create control data mutex\n");
         return;
     }
-
+    mutex_encoder_data = xSemaphoreCreateMutex();
+    if (mutex_control_data == NULL) 
+    {
+        ESP_LOGE(TAG_MUTEX, "Failed to create control data mutex\n");
+        return;
+    }
 
     /* create a queue to handle GPIO event from isr */
     interrupt_queue = xQueueCreate(10, sizeof(uint32_t));
@@ -575,8 +593,9 @@ void app_main (void)
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_A_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_A_PIN);
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_B_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_B_PIN);
 
-    xTaskCreate(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL); /* High priority for sensor readings */
-    xTaskCreate(balance_task, "balance_task", 1024*3, NULL, 4, NULL); /* Critical control calculations */
-    xTaskCreate(motor_task, "motor_task", 1024*2, NULL, 3, NULL);     /* Motor control updates  */
-    xTaskCreate(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL); /* Lowest priority for monitoring */
+    xTaskCreate(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL);     /* High priority for sensor readings */
+    xTaskCreate(balance_task, "balance_task", 1024*3, NULL, 4, NULL);   /* Critical control calculations */
+    xTaskCreate(encoder_task, "encoder_task", 1024*2, NULL, 3, NULL);   /* Encoder reading */
+    xTaskCreate(motor_task, "motor_task", 1024*2, NULL, 3, NULL);       /* Motor control updates  */
+    xTaskCreate(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL);   /* Lowest priority for monitoring */
 }
