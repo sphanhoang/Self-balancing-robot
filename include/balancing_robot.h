@@ -5,19 +5,6 @@
  * @date Sept 2025
  */
 
-// #include "MPU6050.h"
-// #include "MPU6050_6Axis_MotionApps20.h"
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
-// #include "freertos/queue.h"
-// #include <freertos/semphr.h>
-// #include "esp_err.h"
-// #include "esp_log.h"
-// #include "esp_timer.h"
-// #include "driver/gpio.h"
-// #include "driver/mcpwm.h"
-// #include "soc/mcpwm_periph.h"
-// #include "sdkconfig.h"
 #ifndef _BALANCING_ROBOT_H_
 #define _BALANCING_ROBOT_H_
 
@@ -32,10 +19,6 @@
 #include "driver/mcpwm.h"
 #include "soc/mcpwm_periph.h"
 #include "sdkconfig.h"
-#include "esp_http_server.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "nvs_flash.h"
 
 /* I2C parameters */
 #define PIN_SDA                 21
@@ -66,18 +49,19 @@
 
 /* Motor constrains */
 #define MAX_MOTOR_SPEED         255.0f
-#define MIN_MOTOR_SPEED         10.0f           //38.25
+#define MIN_MOTOR_SPEED         30.0f           //38.25
 #define MAX_ANGLE               15.0f           /* degrees */
 #define MIN_ANGLE               -MAX_ANGLE      /* degrees */
 #define PWM_FREQ_HZ             100             /* Hz */
 
 /* PID parameter */
-#define KP_ROLL                 25.0f /* best results so far: P = 25, I = 2, D = .8*/
-#define KI_ROLL                 4.0f
+#define KP_ROLL                 24.0f /* best results so far: P = 25, I = 2, D = .8*/
+#define KI_ROLL                 2.6f
 #define KD_ROLL                 0.8f
 #define KP_SPEED                0.01f
 #define KI_SPEED                0.01f
 #define KD_SPEED                0.01f
+#define TILT_ANGLE              0.6f
 
 /* PID constraints */
 #define ROLL_PID_INTEGRAL_CLAMP     100.0f

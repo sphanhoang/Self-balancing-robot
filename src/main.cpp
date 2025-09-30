@@ -20,7 +20,7 @@ extern "C" {
 
 pid_controller_t speed_pid = 
 {
-    .setpoint = 0.0f,
+    .setpoint = TILT_ANGLE,
     .error = 0.0f,
     .kp = KP_SPEED,
     .ki = KI_SPEED,
@@ -205,7 +205,7 @@ void sensor_task (void *pvParameters)
         }
         else
         {
-            ESP_LOGW(TAG_MUTEX, "Failed to take mutex");
+            ESP_LOGW("SENSOR", "Failed to take mutex");
         }
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
@@ -263,16 +263,25 @@ void balance_task (void *pvParameters)
     const TickType_t xFrequency = pdMS_TO_TICKS(1000 / CONTROL_LOOP_FREQ_HZ);
     sensor_data_t current_data = {};
     control_data_t local_control_data = {};
+    web_control_t web_ctrl = {};
+    static uint32_t debug_count;
     float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
     while (1)
     {  
         // Get web control parameters safely
-        web_control_t web_ctrl;
-        if (xSemaphoreTake(mutex_web_data, pdMS_TO_TICKS(10)) == pdTRUE) {
-            web_ctrl = web_control;
-            xSemaphoreGive(mutex_web_data);
+        if (debug_count++ % 200 == 0) 
+        {
+            if (xSemaphoreTake(mutex_web_data, pdMS_TO_TICKS(10)) == pdTRUE) 
+            {
+                web_ctrl = web_control;
+                xSemaphoreGive(mutex_web_data);
+                // Debug logging every 2 seconds (200 iterations at 100Hz)
+
+                // ESP_LOGI("BALANCE", "Web params - KP: %.2f, KI: %.2f, KD: %.2f, Target: %.2f, Enable: %d",
+                //         web_ctrl.kp_roll, web_ctrl.ki_roll, web_ctrl.kd_roll, 
+                //         web_ctrl.target_angle, web_ctrl.enable_balance);
+            }
         }
-        
         // Update PID parameters from web interface
         roll_pid.kp = web_ctrl.kp_roll;
         roll_pid.ki = web_ctrl.ki_roll;
@@ -312,7 +321,6 @@ void balance_task (void *pvParameters)
         {
             ESP_LOGW(TAG_MUTEX, "Failed to take encoder data mutex");
         }
-
 
         /* control logic here */
         if (current_data.roll > MAX_ANGLE || current_data.roll < MIN_ANGLE)
@@ -567,21 +575,29 @@ void encoder_task(void *pvParameters)
 void monitor_task (void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(10); // x ms second
+    const TickType_t xFrequency = pdMS_TO_TICKS(2000); // x ms second
 
     sensor_data_t monitor_sensor_data;
     // pid_controller_t monitor_speed_pid;
     // pid_controller_t monitor_roll_pid;
     control_data_t monitor_control_data;
+    web_control_t monitor_web_control;
     while (1)
     {
         if (xSemaphoreTake(mutex_sensor_data, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            monitor_sensor_data = sensor_data;
-            // monitor_speed_pid = speed_pid;
-            // monitor_roll_pid = roll_pid;
-            monitor_control_data = control_data;
+            monitor_sensor_data = sensor_data;            
             xSemaphoreGive(mutex_sensor_data);
+        }
+        else if (xSemaphoreTake(mutex_control_data, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            monitor_control_data = control_data;
+            xSemaphoreGive(mutex_control_data);
+        }
+        else if (xSemaphoreTake(mutex_web_data, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            monitor_web_control = web_control;
+            xSemaphoreGive(mutex_web_data);
         }
         else
         {
@@ -602,11 +618,15 @@ void monitor_task (void *pvParameters)
         // printf("Tilt: %3.1f°\n",
         //         monitor_sensor_data.roll);
 
-        printf("motor rps: LEFT: %3.1f   RIGHT: %3.1f, Tilt angle: %3.1f\n", 
-            monitor_control_data.left_motor_feedback,
-            monitor_control_data.right_motor_feedback,
-            monitor_sensor_data.roll
-        );
+        // printf("motor rps: LEFT: %3.1f   RIGHT: %3.1f, Tilt angle: %3.1f\n", 
+        //     monitor_control_data.left_motor_feedback,
+        //     monitor_control_data.right_motor_feedback,
+        //     monitor_sensor_data.roll
+        // );
+
+        ESP_LOGI("BALANCE", "Web params - KP: %.2f, KI: %.2f, KD: %.2f, Target: %.2f, Enable: %d",
+        web_control.kp_roll, web_control.ki_roll, web_control.kd_roll, 
+        web_control.target_angle, web_control.enable_balance);
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
     vTaskDelete(NULL);
@@ -637,11 +657,11 @@ void app_main (void)
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_A_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_A_PIN);
     gpio_isr_handler_add((gpio_num_t)RIGHT_ENCODER_B_PIN, right_encoder_interrupt_handler, (void*) RIGHT_ENCODER_B_PIN);
 
-    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL, 0);     /* Core 1: High priority for sensor readings */
-    xTaskCreatePinnedToCore(balance_task, "balance_task", 1024*3, NULL, 4, NULL, 0);   /* Core 1: Critical control calculations */
-    xTaskCreatePinnedToCore(encoder_task, "encoder_task", 1024*2, NULL, 3, NULL, 0);   /* Core 1: Encoder reading */
-    xTaskCreatePinnedToCore(motor_task, "motor_task", 1024*2, NULL, 3, NULL, 0);       /* Core 1: Motor control updates  */
-    xTaskCreatePinnedToCore(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL, 1);   /* Core 0: Lowest priority for monitoring */
+    xTaskCreatePinnedToCore(sensor_task, "sensor_task", 1024*4, NULL, 5, NULL, 1);     /* Core 1: High priority for sensor readings */
+    xTaskCreatePinnedToCore(balance_task, "balance_task", 1024*3, NULL, 4, NULL, 1);   /* Core 1: Critical control calculations */
+    xTaskCreatePinnedToCore(encoder_task, "encoder_task", 1024*2, NULL, 3, NULL, 1);   /* Core 1: Encoder reading */
+    xTaskCreatePinnedToCore(motor_task, "motor_task", 1024*2, NULL, 3, NULL, 1);       /* Core 1: Motor control updates  */
+    xTaskCreatePinnedToCore(monitor_task, "monitor_task", 1024*4, NULL, 1, NULL, 1);   /* Core 1: Lowest priority for monitoring */
     xTaskCreatePinnedToCore(web_server_task, "web_server_task", WEB_SERVER_STACK_SIZE, NULL, 2, NULL, 1);
 
     ESP_LOGE("MAIN", "ALL tasks initilized succesfully");
