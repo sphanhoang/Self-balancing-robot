@@ -55,25 +55,25 @@
 #define PWM_FREQ_HZ             100             /* Hz */
 
 /* PID parameter */
-#define KP_ROLL                 24.0f /* best results so far: P = 25, I = 2, D = .8*/
-#define KI_ROLL                 2.6f
-#define KD_ROLL                 0.8f
+#define KP_ROLL                 18.0f /* best results so far: P = 18, I = 50, D = .4*/
+#define KI_ROLL                 50.0f
+#define KD_ROLL                 0.4f
 #define KP_SPEED                0.01f
 #define KI_SPEED                0.01f
 #define KD_SPEED                0.01f
 #define TILT_ANGLE              0.6f
 
 /* PID constraints */
-#define ROLL_PID_INTEGRAL_CLAMP     100.0f
+#define ROLL_PID_INTEGRAL_CLAMP     255.0f
 #define ROLL_PID_OUTPUT_CLAMP       255.0f
-#define SPEED_PID_INTEGRAL_CLAMP    100.0f
+#define SPEED_PID_INTEGRAL_CLAMP    255.0f
 #define SPEED_PID_OUTPUT_CLAMP      255.0f
 
 /* Task freq */
 #define MOTOR_UPDATE_FREQ_HZ        100  /* 100Hz */ 
 #define SENSOR_READ_FREQ_HZ         100
 #define CONTROL_LOOP_FREQ_HZ        100
-#define ENCODER_READ_FREQ_HZ        10
+#define ENCODER_READ_FREQ_HZ        1
 
 /* web server parameters */
 #define WEB_SERVER_STACK_SIZE 8192

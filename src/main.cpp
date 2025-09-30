@@ -525,7 +525,7 @@ static void IRAM_ATTR right_encoder_interrupt_handler(void *args)
  */
 float compute_motor_speed(uint32_t &count, float &dt)
 {
-    float ret = ((count / (float)ENCODER_PPR) / dt) / 100.0f; /* Revolution per sec
+    float ret = ((count / (float)ENCODER_PPR) / dt); /* Revolution per sec
                                                             assume dt is 10ms everytime */
     count = 0;
     return ret;                                 
@@ -537,8 +537,8 @@ float compute_motor_speed(uint32_t &count, float &dt)
 void encoder_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(10); // x ms second
-    float dt = 1.0f / CONTROL_LOOP_FREQ_HZ;
+    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / ENCODER_READ_FREQ_HZ);
+    float dt = 1.0f / ENCODER_READ_FREQ_HZ;
     /* Encoder pins set to interrupt mode */
     gpio_config_t motor_io_conf =
     {
@@ -624,9 +624,15 @@ void monitor_task (void *pvParameters)
         //     monitor_sensor_data.roll
         // );
 
-        ESP_LOGI("BALANCE", "Web params - KP: %.2f, KI: %.2f, KD: %.2f, Target: %.2f, Enable: %d",
-        web_control.kp_roll, web_control.ki_roll, web_control.kd_roll, 
-        web_control.target_angle, web_control.enable_balance);
+        // ESP_LOGI("BALANCE", "Web params - KP: %.2f, KI: %.2f, KD: %.2f, Target: %.2f, Enable: %d",
+        // web_control.kp_roll, web_control.ki_roll, web_control.kd_roll, 
+        // web_control.target_angle, web_control.enable_balance);
+
+        printf("motor rps: LEFT: %3.1f   RIGHT: %3.1f\n", 
+            encoder_data.left_motor_speed,
+            encoder_data.right_motor_speed
+        );
+
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
     vTaskDelete(NULL);
