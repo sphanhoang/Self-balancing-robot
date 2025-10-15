@@ -4,8 +4,8 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 
-#define CONFIG_WIFI_SSID        "salt2g"
-#define CONFIG_WIFI_PASSWORD    "68686668"
+#define CONFIG_WIFI_SSID        "wifi_ssid"
+#define CONFIG_WIFI_PASSWORD    "wifi_pw"
 
 
 static const char *TAG_WEB = "WEB";
